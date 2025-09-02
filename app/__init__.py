@@ -1,0 +1,31 @@
+from flask import Flask
+from flask_sqlalchemy import SQLAlchemy
+from flask.json.provider import DefaultJSONProvider
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+
+class CustomJSONProvider(DefaultJSONProvider):
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("ensure_ascii", False)  # luôn tắt ascii
+        return super().dumps(obj, **kwargs)
+
+    def loads(self, s, **kwargs):
+        return super().loads(s, **kwargs)
+
+
+db = SQLAlchemy()
+
+def create_app():
+    app = Flask(__name__)
+    app.json = CustomJSONProvider(app)
+    app.config["JWT_SECRET_KEY"] = "4f9c2a7f6a8b2c9e9d3a8d7f1c2b3e4f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4"
+    app.secret_key = "KJGHJG^&*%&*^T&*(IGFG%ERFTGHCFHGF^&**&TYIU"
+    app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://root:123456@localhost/phustore?charset=utf8mb4"
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = True
+
+    db.init_app(app)
+    CORS(app)
+    jwt = JWTManager(app)
+    from .routes import main
+    app.register_blueprint(main)
+    return app
