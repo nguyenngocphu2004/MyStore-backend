@@ -1,10 +1,12 @@
 from flask import Blueprint, jsonify
-from .models import Category, Product,User,UserRole
+from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem
 from . import db
 from flask import request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from datetime import datetime
+from flask_login import current_user
+
 main = Blueprint("main", __name__)
 
 @main.route("/categories", methods=["GET"])
@@ -200,3 +202,140 @@ def update_profile():
         user.phone = phone
     db.session.commit()
     return jsonify({"message": "Cập nhật thành công"}), 200
+
+
+@main.route('/api/buy', methods=['POST'])
+def buy_now():
+    try:
+        data = request.get_json()
+        product_id = data.get('product_id')
+        quantity = data.get('quantity', 1)
+        guest_name = data.get('guest_name')
+        guest_phone = data.get('guest_phone')
+
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({"error": "Sản phẩm không tồn tại"}), 404
+
+        total_price = product.price * quantity
+
+        user_id = current_user.get_id() if current_user.is_authenticated else None
+
+        # Nếu là khách nhưng không điền tên/SĐT → báo lỗi
+        if not user_id and (not guest_name or not guest_phone):
+            return jsonify({"error": "Vui lòng nhập tên và số điện thoại"}), 400
+
+        # Tạo đơn hàng
+        order = Order(
+            user_id=user_id,
+            guest_name=guest_name if not user_id else None,
+            guest_phone=guest_phone if not user_id else None,
+            total_price=total_price
+        )
+
+        db.session.add(order)
+        db.session.commit()
+
+        order_item = OrderItem(
+            order_id=order.id,
+            product_id=product.id,
+            quantity=quantity,
+            unit_price=product.price
+        )
+
+        db.session.add(order_item)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Đặt hàng thành công",
+            "order_id": order.id,
+            "is_guest": user_id is None
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@main.route("/cart", methods=["GET"])
+@jwt_required()
+def get_cart():
+    user_id = get_jwt_identity()
+    cart_items = CartItem.query.filter_by(user_id=user_id).all()
+
+    result = [
+        {
+            "id": item.id,
+            "product_id": item.product.id,
+            "name": item.product.name,
+            "image": item.product.image,
+            "unit_price": item.product.price,
+            "quantity": item.quantity,
+            "total_price": item.quantity * item.product.price
+        }
+        for item in cart_items
+    ]
+    return jsonify(result), 200
+
+
+@main.route("/cart/add", methods=["POST"])
+@jwt_required()
+def add_to_cart():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    product_id = data.get("product_id")
+    quantity = int(data.get("quantity", 1))
+
+    if not product_id:
+        return jsonify({"error": "Thiếu product_id"}), 400
+
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({"error": "Sản phẩm không tồn tại"}), 404
+
+    # Kiểm tra sản phẩm đã tồn tại trong giỏ hàng
+    existing_item = CartItem.query.filter_by(user_id=user_id, product_id=product_id).first()
+    if existing_item:
+        existing_item.quantity += quantity
+    else:
+        new_item = CartItem(user_id=user_id, product_id=product_id, quantity=quantity)
+        db.session.add(new_item)
+
+    db.session.commit()
+    return jsonify({"message": "Thêm vào giỏ hàng thành công"}), 200
+
+
+@main.route("/cart/update/<int:product_id>", methods=["PUT"])
+@jwt_required()
+def update_cart_item(product_id):
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    quantity = int(data.get("quantity", 1))
+
+    item = CartItem.query.filter_by(user_id=user_id, product_id=product_id).first()
+    if not item:
+        return jsonify({"error": "Không tìm thấy mục giỏ hàng"}), 404
+
+    item.quantity = quantity
+    db.session.commit()
+    return jsonify({"message": "Cập nhật số lượng thành công"}), 200
+
+
+
+@main.route("/cart/delete/<int:item_id>", methods=["DELETE"])
+@jwt_required()
+def delete_cart_item(item_id):
+    user_id = get_jwt_identity()
+
+    # Lấy bản ghi CartItem theo id (item_id) và kiểm tra user_id
+    item = CartItem.query.filter_by(id=item_id, user_id=user_id).first()
+    if not item:
+        return jsonify({"error": "Không tìm thấy mục giỏ hàng"}), 404
+
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"message": "Xóa khỏi giỏ hàng thành công"}), 200
+
+
+

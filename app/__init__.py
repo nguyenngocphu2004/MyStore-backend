@@ -25,7 +25,7 @@ def create_app():
 
     db.init_app(app)
     CORS(app)
-    jwt = JWTManager(app)
+    JWTManager(app)
     from .routes import main
     app.register_blueprint(main)
     return app
