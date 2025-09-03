@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify,url_for
 from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem
 from . import db
 from flask import request
@@ -31,24 +31,9 @@ def get_products():
             "id": p.id,
             "name": p.name,
             "price": p.price,
-            "image": p.image,
-            "brand": p.brand,
+            "images": [img.url for img in p.images],
             "category": p.category.name if p.category else None,
-            "cpu": p.cpu,
-            "ram": p.ram,
-            "storage": p.storage,
-            "screen": p.screen,
-            "battery": p.battery,
-            "os": p.os,
-            "camera_front": p.camera_front,
-            "camera_rear": p.camera_rear,
-            "graphics_card": p.graphics_card,
-            "weight": p.weight,
-            "color": p.color,
-            "dimensions": p.dimensions,
-            "release_date": p.release_date.isoformat() if p.release_date else None,
-            "ports": p.ports,
-            "warranty": p.warranty,
+            "brand": p.brand
         }
         result.append(product_data)
 
@@ -140,7 +125,7 @@ def search_products():
             "id": p.id,
             "name": p.name,
             "price": p.price,
-            "image": p.image,
+            "images": [img.url for img in p.images],
             "category": p.category.name if p.category else None
         }
         for p in results
@@ -154,7 +139,7 @@ def get_product_detail(product_id):
         "id": product.id,
         "name": product.name,
         "price": product.price,  # Format tiền tệ
-        "image": product.image,
+        "images": [img.url for img in product.images],
         "brand": product.brand,
         "category": product.category.name if product.category else None,
 
@@ -268,7 +253,7 @@ def get_cart():
             "id": item.id,
             "product_id": item.product.id,
             "name": item.product.name,
-            "image": item.product.image,
+            "images": [img.url for img in item.product.images],
             "unit_price": item.product.price,
             "quantity": item.quantity,
             "total_price": item.quantity * item.product.price

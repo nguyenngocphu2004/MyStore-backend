@@ -4,6 +4,10 @@ from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
 class CustomJSONProvider(DefaultJSONProvider):
     def dumps(self, obj, **kwargs):
         kwargs.setdefault("ensure_ascii", False)  # luôn tắt ascii
@@ -11,6 +15,13 @@ class CustomJSONProvider(DefaultJSONProvider):
 
     def loads(self, s, **kwargs):
         return super().loads(s, **kwargs)
+
+cloudinary.config(
+  cloud_name="dbnra16ca",      # Tên cloud trong Cloudinary
+  api_key="548673345681374",
+  api_secret="8EoiDtQ6DZc77GYZzBzI9j2fqKs",
+  secure=True
+)
 
 
 db = SQLAlchemy()
