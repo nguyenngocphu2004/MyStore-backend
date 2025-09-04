@@ -1,12 +1,13 @@
-from flask import Blueprint, jsonify,url_for
-from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem
+from flask import Blueprint, jsonify,make_response
+from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem,Comment,CommentVote
 from . import db
 from flask import request
+import uuid
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from datetime import datetime
 from flask_login import current_user
-
+from .utils import time_ago
 main = Blueprint("main", __name__)
 
 @main.route("/categories", methods=["GET"])
@@ -190,6 +191,7 @@ def update_profile():
 
 
 @main.route('/api/buy', methods=['POST'])
+@jwt_required(optional=True)
 def buy_now():
     try:
         data = request.get_json()
@@ -197,50 +199,64 @@ def buy_now():
         quantity = data.get('quantity', 1)
         guest_name = data.get('guest_name')
         guest_phone = data.get('guest_phone')
+        address = data.get('address')
+        delivery_method = data.get('delivery_method', 'store')
 
         product = Product.query.get(product_id)
         if not product:
             return jsonify({"error": "Sản phẩm không tồn tại"}), 404
 
-        total_price = product.price * quantity
+        user_id = get_jwt_identity()
 
-        user_id = current_user.get_id() if current_user.is_authenticated else None
-
-        # Nếu là khách nhưng không điền tên/SĐT → báo lỗi
         if not user_id and (not guest_name or not guest_phone):
             return jsonify({"error": "Vui lòng nhập tên và số điện thoại"}), 400
 
-        # Tạo đơn hàng
+        if delivery_method == "home" and not address:
+            return jsonify({"error": "Vui lòng nhập địa chỉ giao hàng"}), 400
+
         order = Order(
             user_id=user_id,
             guest_name=guest_name if not user_id else None,
             guest_phone=guest_phone if not user_id else None,
-            total_price=total_price
+            total_price=product.price * quantity,
+            delivery_method=delivery_method,
+            address=address if delivery_method == "home" else None
         )
 
-        db.session.add(order)
-        db.session.commit()
-
         order_item = OrderItem(
-            order_id=order.id,
+            order=order,
             product_id=product.id,
             quantity=quantity,
             unit_price=product.price
         )
 
+        db.session.add(order)
         db.session.add(order_item)
         db.session.commit()
 
         return jsonify({
             "message": "Đặt hàng thành công",
-            "order_id": order.id,
+            "order": {
+                "id": order.id,
+                "total_price": order.total_price,
+                "created_at": order.created_at.isoformat(),
+                "items": [
+                    {
+                        "product_id": product.id,
+                        "product_name": product.name,
+                        "quantity": quantity,
+                        "price": product.price
+                    }
+                ],
+                "delivery_method": delivery_method,
+                "address": order.address
+            },
             "is_guest": user_id is None
         }), 200
 
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
-
 
 @main.route("/cart", methods=["GET"])
 @jwt_required()
@@ -322,5 +338,194 @@ def delete_cart_item(item_id):
     db.session.commit()
     return jsonify({"message": "Xóa khỏi giỏ hàng thành công"}), 200
 
+@main.route("/api/orders/guest", methods=["GET"])
+def guest_orders():
+    phone = request.args.get("phone")
+    if not phone:
+        return jsonify({"error": "Vui lòng nhập số điện thoại"}), 400
+
+    orders = Order.query.filter_by(guest_phone=phone).all()
+    if not orders:
+        return jsonify([])
+
+    data = []
+    for order in orders:
+        items = [
+            {
+                "product_name": item.product.name,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price
+            }
+            for item in order.items
+        ]
+        data.append({
+            "id": order.id,
+            "total_price": order.total_price,
+            "delivery_method": order.delivery_method,
+            "address": order.address,
+            "created_at": order.created_at.strftime("%Y-%m-%d %H:%M"),
+            "items": items
+        })
+
+    return jsonify(data)
 
 
+@main.route('/products/<int:product_id>/comments', methods=['GET'])
+def get_comments(product_id):
+    comments = Comment.query.filter_by(product_id=product_id).order_by(Comment.created_at.desc()).all()
+    result = []
+    total_rating = 0
+    count_rating = 0
+    for c in comments:
+        result.append({
+            "id": c.id,
+            "username": c.user.username if c.user else None,
+            "guest_name": c.guest_name,
+            "guest_phone": c.guest_phone,
+            "content": c.content,
+            "rating": c.rating,
+            "created_at": time_ago(c.created_at),
+            "likes": c.likes,
+        })
+        if c.rating:
+            total_rating += c.rating
+            count_rating += 1
+    average_rating = total_rating / count_rating if count_rating > 0 else 0
+    return jsonify({
+        "comments": result,
+        "average_rating": average_rating
+    })
+
+
+@main.route('/products/<int:product_id>/comments', methods=['POST'])
+@jwt_required(optional=True)   # Cho phép cả khách và user login
+def add_comment(product_id):
+    try:
+        data = request.get_json()
+        content = data.get("content")
+        rating = data.get("rating")
+        if not content:
+            return jsonify({"error": "Nội dung không được để trống"}), 400
+
+        # Mặc định là khách
+        user_id = get_jwt_identity()
+        guest_name = None
+        guest_phone = None
+
+        # Nếu là khách thì bắt buộc nhập tên và sđt
+        if not user_id:
+            guest_name = data.get("guest_name")
+            guest_phone = data.get("guest_phone")
+            if not guest_name or not guest_phone:
+                return jsonify({"error": "Khách vãng lai phải nhập họ tên và số điện thoại"}), 400
+
+        # Tạo comment
+        comment = Comment(
+            product_id=product_id,
+            user_id=user_id,
+            guest_name=guest_name,
+            guest_phone=guest_phone,
+            content=content,
+            rating=rating
+        )
+
+        db.session.add(comment)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Bình luận thành công",
+            "comment": {
+                "id": comment.id,
+                "username": comment.user.username if comment.user else None,
+                "guest_name": comment.guest_name,
+                "content": comment.content,
+                "rating": comment.rating,
+                "created_at": time_ago(comment.created_at),
+                "likes": 0
+            }
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@main.route("/comments/<int:comment_id>/vote", methods=["POST"])
+@jwt_required(optional=True)  # Cho phép guest
+def vote_comment(comment_id):
+    data = request.get_json()
+    action = data.get("action")
+    if action not in ["like"]:
+        return jsonify({"error": "Hành động không hợp lệ"}), 400
+
+    comment = Comment.query.get_or_404(comment_id)
+
+    user_id = get_jwt_identity()
+    session_id = request.cookies.get("session_id")
+
+    # Nếu guest chưa có session_id thì tạo mới
+    if not user_id and not session_id:
+        session_id = str(uuid.uuid4())
+
+    # Kiểm tra đã vote
+    if user_id:
+        vote = CommentVote.query.filter_by(comment_id=comment.id, user_id=user_id).first()
+    else:
+        vote = CommentVote.query.filter_by(comment_id=comment.id, session_id=session_id).first()
+
+    if vote:
+        if vote.action == action:
+            db.session.delete(vote)  # bấm lại -> hủy
+        else:
+            vote.action = action     # đổi like <-> dislike
+    else:
+        vote = CommentVote(
+            comment_id=comment.id,
+            user_id=user_id,
+            session_id=session_id if not user_id else None,
+            action=action
+        )
+        db.session.add(vote)
+
+    db.session.commit()
+
+    likes = CommentVote.query.filter_by(comment_id=comment.id, action="like").count()
+    comment.likes = likes
+    db.session.commit()
+    resp = make_response(jsonify({"likes": likes}))
+    # Nếu guest thì set cookie lưu lại session_id
+    if not user_id:
+        resp.set_cookie("session_id",
+        session_id,
+        httponly=True,
+        max_age=60*60*24*30,  # 30 ngày
+        samesite="None",      # 👈 cho phép cross-site
+        secure=False)
+
+    return resp
+
+@main.route("/orders", methods=["GET"])
+@jwt_required()
+def get_orders():
+    user_id = get_jwt_identity()
+    orders = Order.query.filter_by(user_id=user_id).order_by(Order.created_at.desc()).all()
+
+    result = []
+    for o in orders:
+        result.append({
+            "id": o.id,
+            "total_price": o.total_price,
+            "created_at": o.created_at.isoformat(),
+            "items": [
+                {
+                    "product_id": d.product_id,
+                    "product_name": d.product.name,
+                    "quantity": d.quantity,
+                    "price": d.unit_price
+                } for d in o.details
+            ],
+            "delivery_method": o.delivery_method,
+            "address": o.address
+        })
+
+    return jsonify({"orders": result})

@@ -84,6 +84,8 @@ class Order(BaseModel):
     guest_phone = db.Column(db.String(20), nullable=True)   # SĐT khách vãng lai
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     total_price = db.Column(db.Float, nullable=False)
+    delivery_method = db.Column(db.String(20), default="store")
+    address = db.Column(db.String(255), nullable=True)
     items = db.relationship("OrderItem", backref="order", lazy=True)
 
     def __str__(self):
@@ -110,6 +112,39 @@ class CartItem(BaseModel):
 
     user = db.relationship("User", backref="cart_items")
     product = db.relationship("Product")
+
+
+class Comment(BaseModel):
+    __tablename__ = "comments"
+
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # null nếu khách
+    guest_name = db.Column(db.String(100), nullable=True)
+    guest_phone = db.Column(db.String(20), nullable=True)
+    content = db.Column(db.Text, nullable=False)
+    rating = db.Column(db.Integer, nullable=False, default=5)
+    likes = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+    product = db.relationship('Product', backref=db.backref('comments', lazy=True))
+    user = db.relationship('User', backref=db.backref('comments', lazy=True))
+
+class CommentVote(BaseModel):
+    __tablename__ = "comment_votes"
+    comment_id = db.Column(db.Integer, db.ForeignKey("comments.id"), nullable=False)
+
+    # Nếu user login thì dùng user_id
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    # Nếu khách thì lưu session_id
+    session_id = db.Column(db.String(100), nullable=True)
+
+    action = db.Column(db.String(10), nullable=False)  # "like" hoặc "dislike"
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+    user = db.relationship("User", backref="votes")
+    comment = db.relationship("Comment", backref="votes")
+
 
 
 
