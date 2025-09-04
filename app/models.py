@@ -100,8 +100,6 @@ class OrderItem(BaseModel):
     unit_price = db.Column(db.Float, nullable=False)
     product = db.relationship("Product", lazy=True)
 
-    def __str__(self):
-        return self.name
 
 class CartItem(BaseModel):
     __tablename__ = "cart_items"
@@ -428,6 +426,16 @@ def seed_data(db):
             img = ProductImage(url=url, product_id=p3.id)
             db.session.add(img)
         db.session.commit()
+    admin_username = "admin"
+    admin_email = "admin@example.com"
+    admin = User(
+        username=admin_username,
+        email=admin_email,
+        role=UserRole.ADMIN
+    )
+    admin.set_password("admin123")  # mật khẩu admin
+    db.session.add(admin)
+    db.session.commit()
 
 if __name__ == "__main__":
     app = create_app()

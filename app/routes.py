@@ -1,13 +1,16 @@
 from flask import Blueprint, jsonify,make_response
-from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem,Comment,CommentVote
+from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem,Comment,CommentVote,ProductImage
 from . import db
 from flask import request
 import uuid
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
-from datetime import datetime
-from flask_login import current_user
+from functools import wraps
+import os
 from .utils import time_ago
+import cloudinary
+import cloudinary.uploader
+
 main = Blueprint("main", __name__)
 
 @main.route("/categories", methods=["GET"])
@@ -505,7 +508,7 @@ def vote_comment(comment_id):
     return resp
 
 @main.route("/orders", methods=["GET"])
-@jwt_required()
+@jwt_required(optional=True)
 def get_orders():
     user_id = get_jwt_identity()
     orders = Order.query.filter_by(user_id=user_id).order_by(Order.created_at.desc()).all()
@@ -522,10 +525,149 @@ def get_orders():
                     "product_name": d.product.name,
                     "quantity": d.quantity,
                     "price": d.unit_price
-                } for d in o.details
+                } for d in o.items
             ],
             "delivery_method": o.delivery_method,
             "address": o.address
         })
 
     return jsonify({"orders": result})
+
+@main.route("/admin/login", methods=["POST"])
+def admin_login():
+    data = request.get_json()
+    username = data.get("username")
+    password = data.get("password")
+
+    user = User.query.filter_by(username=username, role=UserRole.ADMIN).first()
+    if not user or not user.check_password(password) :
+        return jsonify({"error": "Sai username hoặc password"}), 401
+
+    token = create_access_token(identity=str(user.id))
+    return jsonify({"token": token, "username": user.username, "role": user.role.value})
+
+
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        if not user or user.role != UserRole.ADMIN:
+            return jsonify({"error": "Chỉ admin mới truy cập được"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@main.route("/admin/users", methods=["GET"])
+@admin_required
+def get_users():
+    users = User.query.all()
+    result = []
+    for u in users:
+        result.append({
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role.value
+        })
+    return jsonify(result)
+
+
+@main.route("/admin/products", methods=["POST"])
+@admin_required
+def create_product():
+    data = request.get_json()
+    try:
+        product = Product(
+            name=data.get("name"),
+            price=float(data.get("price")),
+            brand=data.get("brand"),
+            category_id=int(data.get("category_id")),
+            cpu=data.get("cpu"),
+            ram=data.get("ram"),
+            storage=data.get("storage"),
+            screen=data.get("screen"),
+            battery=data.get("battery"),
+            os=data.get("os"),
+            camera_front=data.get("camera_front"),
+            camera_rear=data.get("camera_rear"),
+            weight=data.get("weight"),
+            color=data.get("color"),
+            dimensions=data.get("dimensions"),
+            release_date=data.get("release_date"),  # YYYY-MM-DD
+            graphics_card=data.get("graphics_card"),
+            ports=data.get("ports"),
+            warranty=data.get("warranty")
+        )
+        db.session.add(product)
+        db.session.commit()
+        return jsonify({"message": "Product created successfully", "id": product.id}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+UPLOAD_FOLDER = "static/uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+@main.route("/admin/products/<int:product_id>/images", methods=["POST"])
+@admin_required
+def upload_product_images(product_id):
+    product = Product.query.get_or_404(product_id)
+
+    if 'images' not in request.files:
+        return jsonify({"error": "No images provided"}), 400
+
+    uploaded_files = request.files.getlist('images')  # list các file ảnh
+    uploaded_urls = []
+
+    for file in uploaded_files:
+        result = cloudinary.uploader.upload(file, folder=f"products/{product.id}")
+        img_url = result['secure_url']
+        img = ProductImage(url=img_url, product_id=product.id)
+        db.session.add(img)
+        uploaded_urls.append(img_url)
+
+    db.session.commit()
+    return jsonify({"message": "Images uploaded", "urls": uploaded_urls}), 201
+
+
+from sqlalchemy import func
+
+@main.route("/admin/orders", methods=["GET"])
+@admin_required
+def admin_orders():
+    orders = Order.query.order_by(Order.created_at.desc()).all()
+
+    result = []
+    total_revenue = 0
+
+    for o in orders:
+        items = [
+            {
+                "product_id": item.product_id,
+                "product_name": item.product.name,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_price": item.quantity * item.unit_price
+            }
+            for item in o.items
+        ]
+        order_total = sum([item['total_price'] for item in items])
+        total_revenue += order_total
+
+        result.append({
+            "id": o.id,
+            "user_id": o.user_id,
+            "guest_name": o.guest_name,
+            "guest_phone": o.guest_phone,
+            "total_price": order_total,
+            "delivery_method": o.delivery_method,
+            "address": o.address,
+            "created_at": o.created_at.strftime("%Y-%m-%d %H:%M"),
+            "items": items
+        })
+
+    return jsonify({
+        "orders": result,
+        "total_revenue": total_revenue
+    })
