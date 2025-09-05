@@ -671,3 +671,26 @@ def admin_orders():
         "orders": result,
         "total_revenue": total_revenue
     })
+
+@main.route("/admin/products/<int:product_id>", methods=["PUT"])
+@admin_required
+def update_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    data = request.get_json()
+    for key in ["name","price","brand","category_id","cpu","ram","storage","screen",
+                "battery","os","camera_front","camera_rear","weight","color","dimensions",
+                "release_date","graphics_card","ports","warranty"]:
+        if key in data:
+            setattr(product, key, data[key])
+    db.session.commit()
+    return jsonify({"message": "Product updated successfully", "id": product.id})
+
+# --- Xóa sản phẩm ---
+@main.route("/admin/products/<int:product_id>", methods=["DELETE"])
+@admin_required
+def delete_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    db.session.delete(product)
+    db.session.commit()
+    return jsonify({"message": "Product deleted successfully"})
+

@@ -46,7 +46,7 @@ class Product(BaseModel):
     price = db.Column(db.Float, nullable=False)
     brand = db.Column(db.String(200), nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), nullable=False)
-    images = db.relationship("ProductImage", backref="product", lazy=True)
+    images = db.relationship("ProductImage", backref="product",cascade="all, delete-orphan", lazy=True)
     # Thông số kỹ thuật
     cpu = db.Column(db.String(200), nullable=True)
     ram = db.Column(db.String(100), nullable=True)
@@ -68,10 +68,8 @@ class Product(BaseModel):
         return self.name
 
 
-class ProductImage(db.Model):
+class ProductImage(BaseModel):
     __tablename__ = "product_images"
-
-    id = db.Column(db.Integer, primary_key=True)
     url = db.Column(db.String(255), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
 
@@ -142,8 +140,6 @@ class CommentVote(BaseModel):
 
     user = db.relationship("User", backref="votes")
     comment = db.relationship("Comment", backref="votes")
-
-
 
 
 def seed_data(db):
