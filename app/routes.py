@@ -11,6 +11,7 @@ import os
 from .utils import time_ago
 import cloudinary
 import cloudinary.uploader
+from datetime import datetime
 
 main = Blueprint("main", __name__)
 
@@ -102,22 +103,20 @@ def register():
 @main.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
-    print("Dữ liệu nhận được từ frontend:", data)  # In ra toàn bộ JSON
-
     username = data.get("username")
     password = data.get("password")
-    print("User nhập:", username)
-    print("Password nhập:", password)
 
     user = User.query.filter_by(username=username).first()
 
     if not user or not user.check_password(password):
-        print("Đăng nhập thất bại: sai email hoặc mật khẩu")
         return jsonify({"error": "Sai email hoặc mật khẩu"}), 401
 
     access_token = create_access_token(identity=str(user.id))
-    print("Đăng nhập thành công, tạo access token:", access_token)
-    return jsonify({"access_token": access_token, "user": user.username}), 200
+    return jsonify({
+        "access_token": access_token,
+        "user": user.username,
+        "role": user.role.value   # Thêm dòng này
+    }), 200
 
 
 @main.route("/profile", methods=["GET"])
@@ -390,9 +389,29 @@ def guest_orders():
     return jsonify(data)
 
 
+from sqlalchemy import or_
+
 @main.route('/products/<int:product_id>/comments', methods=['GET'])
+@jwt_required(optional=True)
 def get_comments(product_id):
-    comments = Comment.query.filter_by(product_id=product_id).order_by(Comment.created_at.desc()).all()
+    user_id = get_jwt_identity()
+    session_id = request.cookies.get("session_id")
+
+    comments = Comment.query.filter_by(product_id=product_id)
+
+    # Nếu là guest, chỉ trả comment mà guest_phone đã từng mua sản phẩm
+    if not user_id and session_id:
+        # Lấy danh sách số điện thoại đã mua sản phẩm này
+        purchased_phones = db.session.query(Order.guest_phone)\
+            .join(OrderItem)\
+            .filter(OrderItem.product_id == product_id)\
+            .distinct().all()
+        purchased_phones = [p[0] for p in purchased_phones]
+
+        comments = comments.filter(Comment.guest_phone.in_(purchased_phones))
+
+    comments = comments.order_by(Comment.created_at.desc()).all()
+
     result = []
     total_rating = 0
     count_rating = 0
@@ -401,24 +420,28 @@ def get_comments(product_id):
             "id": c.id,
             "username": c.user.username if c.user else None,
             "guest_name": c.guest_name,
-            "guest_phone": c.guest_phone,
             "content": c.content,
             "rating": c.rating,
+            "admin_reply": c.admin_reply,
             "created_at": time_ago(c.created_at),
-            "likes": c.likes,
+            "reply_at": time_ago(c.reply_at) if c.reply_at else None,
+            "likes": c.likes or 0,
         })
         if c.rating:
             total_rating += c.rating
             count_rating += 1
+
     average_rating = total_rating / count_rating if count_rating > 0 else 0
+
     return jsonify({
         "comments": result,
         "average_rating": average_rating
     })
 
 
+
 @main.route('/products/<int:product_id>/comments', methods=['POST'])
-@jwt_required(optional=True)   # Cho phép cả khách và user login
+@jwt_required(optional=True)  # cho phép guest
 def add_comment(product_id):
     try:
         data = request.get_json()
@@ -427,24 +450,47 @@ def add_comment(product_id):
         if not content:
             return jsonify({"error": "Nội dung không được để trống"}), 400
 
-        # Mặc định là khách
         user_id = get_jwt_identity()
-        guest_name = None
-        guest_phone = None
+        guest_name = data.get("guest_name")
+        guest_phone = data.get("guest_phone")
 
-        # Nếu là khách thì bắt buộc nhập tên và sđt
-        if not user_id:
-            guest_name = data.get("guest_name")
-            guest_phone = data.get("guest_phone")
+        # Nếu user login
+        if user_id:
+            purchased = (
+                db.session.query(OrderItem)
+                .join(Order)
+                .filter(
+                    Order.user_id == user_id,
+                    OrderItem.product_id == product_id,
+                )
+                .first()
+            )
+            if not purchased:
+                return jsonify({"error": "Bạn phải mua sản phẩm này mới được bình luận"}), 403
+
+        # Nếu guest
+        else:
             if not guest_name or not guest_phone:
                 return jsonify({"error": "Khách vãng lai phải nhập họ tên và số điện thoại"}), 400
+
+            purchased = (
+                db.session.query(OrderItem)
+                .join(Order)
+                .filter(
+                    Order.guest_phone == guest_phone,
+                    OrderItem.product_id == product_id,
+                )
+                .first()
+            )
+            if not purchased:
+                return jsonify({"error": "Số điện thoại này chưa mua sản phẩm, không thể bình luận"}), 403
 
         # Tạo comment
         comment = Comment(
             product_id=product_id,
             user_id=user_id,
-            guest_name=guest_name,
-            guest_phone=guest_phone,
+            guest_name=guest_name if not user_id else None,
+            guest_phone=guest_phone if not user_id else None,
             content=content,
             rating=rating
         )
@@ -468,6 +514,7 @@ def add_comment(product_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
 
 
 @main.route("/comments/<int:comment_id>/vote", methods=["POST"])
@@ -654,42 +701,61 @@ from sqlalchemy import func
 
 @main.route("/admin/orders", methods=["GET"])
 @admin_required
-def admin_orders():
+def admin_get_orders():
     orders = Order.query.order_by(Order.created_at.desc()).all()
-
     result = []
-    total_revenue = 0
-
     for o in orders:
-        items = [
-            {
-                "product_id": item.product_id,
-                "product_name": item.product.name,
-                "quantity": item.quantity,
-                "unit_price": item.unit_price,
-                "total_price": item.quantity * item.unit_price
-            }
-            for item in o.items
-        ]
-        order_total = sum([item['total_price'] for item in items])
-        total_revenue += order_total
-
         result.append({
             "id": o.id,
-            "user_id": o.user_id,
+            "user": {
+                "username": o.user.username,
+                "phone": o.user.phone
+            } if o.user else None,
             "guest_name": o.guest_name,
             "guest_phone": o.guest_phone,
-            "total_price": order_total,
+            "created_at": o.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_price": o.total_price,
             "delivery_method": o.delivery_method,
             "address": o.address,
-            "created_at": o.created_at.strftime("%Y-%m-%d %H:%M"),
-            "items": items
+            "items_count": len(o.items)
         })
 
+    return jsonify(result)
+
+
+@main.route("/admin/orders/<int:order_id>", methods=["GET"])
+@admin_required
+def admin_get_order_detail(order_id):
+    order = Order.query.get_or_404(order_id)
+    items = []
+    for item in order.items:
+        product_name = item.product.name if item.product else "Sản phẩm đã xóa"
+        items.append({
+            "product_name": product_name,
+            "quantity": item.quantity,
+            "unit_price": item.unit_price,
+            "total_price": item.quantity * item.unit_price
+        })
+
+    user_info = None
+    if order.user:
+        user_info = {
+            "username": order.user.username,
+            "phone": order.user.phone
+        }
+
     return jsonify({
-        "orders": result,
-        "total_revenue": total_revenue
+        "id": order.id,
+        "user": user_info,
+        "guest_name": order.guest_name,
+        "guest_phone": order.guest_phone,
+        "created_at": order.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "total_price": order.total_price,
+        "delivery_method": order.delivery_method,
+        "address": order.address,
+        "items": items
     })
+
 
 @main.route("/admin/products/<int:product_id>", methods=["PUT"])
 @admin_required
@@ -895,3 +961,29 @@ def delete_brand(id):
     db.session.delete(b)
     db.session.commit()
     return jsonify({"message": "Đã xóa brand"})
+
+@main.route("/comments/<int:comment_id>/reply", methods=["POST"])
+@admin_required
+def reply_comment(comment_id):
+    data = request.json
+    reply_content = data.get("content")
+
+    if not reply_content:
+        return jsonify({"error": "Nội dung trả lời không được để trống"}), 400
+
+    comment = Comment.query.get(comment_id)
+    if not comment:
+        return jsonify({"error": "Không tìm thấy bình luận"}), 404
+
+    # Lưu trả lời vào cột admin_reply
+    comment.admin_reply = reply_content
+    comment.reply_at = datetime.now()
+    db.session.commit()
+
+    return jsonify({
+        "message": "Trả lời thành công",
+        "reply": {
+            "admin_reply": comment.admin_reply,
+            "reply_at": time_ago(comment.reply_at)
+        }
+    })

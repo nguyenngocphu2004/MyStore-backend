@@ -22,6 +22,7 @@ class User(BaseModel, UserMixin):
     phone = db.Column(db.String(20), nullable=True)
     role = db.Column(Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
+    user = db.relationship("Order", backref="user", lazy=True)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -133,7 +134,8 @@ class Comment(BaseModel):
     rating = db.Column(db.Integer, nullable=False, default=5)
     likes = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.now)
-
+    admin_reply = db.Column(db.Text, nullable=True)
+    reply_at = db.Column(db.DateTime, nullable=True)
     product = db.relationship('Product', backref=db.backref('comments', lazy=True))
     user = db.relationship('User', backref=db.backref('comments', lazy=True))
 
