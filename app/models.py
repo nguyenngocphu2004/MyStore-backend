@@ -37,6 +37,16 @@ class Category(BaseModel):
 
     def __str__(self):
         return self.name
+class Brand(BaseModel):
+    __tablename__ = "brands"
+
+    name = db.Column(db.String(200), unique=True, nullable=False)
+    products = db.relationship("Product", backref="brand", lazy=True)
+
+    def __str__(self):
+        return self.name
+
+
 
 
 class Product(BaseModel):
@@ -44,8 +54,10 @@ class Product(BaseModel):
 
     name = db.Column(db.String(200), nullable=False)
     price = db.Column(db.Float, nullable=False)
-    brand = db.Column(db.String(200), nullable=False)
+    cost_price = db.Column(db.Float, nullable=False)
+    stock = db.Column(db.Float, nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), nullable=False)
+    brand_id = db.Column(db.Integer, db.ForeignKey("brands.id"), nullable=False)
     images = db.relationship("ProductImage", backref="product",cascade="all, delete-orphan", lazy=True)
     # Thông số kỹ thuật
     cpu = db.Column(db.String(200), nullable=True)
@@ -146,108 +158,118 @@ def seed_data(db):
     if not Category.query.first():
         phone = Category(name="Điện thoại")
         laptop = Category(name="Laptop")
-
-        db.session.add_all([phone, laptop])
+        brand = Brand(name="Apple")
+        brand1 = Brand(name="Samsung")
+        brand2 = Brand(name="Oppo")
+        brand3 = Brand(name="Xiaomi")
+        brand4 = Brand(name="Dell")
+        brand5 = Brand(name="Gigabyte")
+        brand6 = Brand(name="Acer")
+        brand7 = Brand(name="Lenovo")
+        brand8 = Brand(name="Macbook")
+        brand9 = Brand(name="Hp")
+        brand11 = Brand(name="Asus")
+        db.session.add_all([phone, laptop,brand,brand1,brand2,brand3,brand4,brand5,brand6,brand7,brand8,brand9,brand11])
         db.session.commit()
 
-        p1 = Product(name="iPhone 14 Pro Max", price=32990000, brand="Apple",
+        p1 = Product(name="iPhone 14 Pro Max", price=32990000, brand_id=brand.id, cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p2 = Product(name="iPhone 15 Pro Max", price=35990000,  brand="Apple",
+        p2 = Product(name="iPhone 15 Pro Max", price=35990000,  brand_id=brand.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p3 = Product(name="iPhone 16 Pro Max", price=38990000,  brand="Apple",
+        p3 = Product(name="iPhone 16 Pro Max", price=38990000,  brand_id=brand.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p4 = Product(name="iPhone X", price=30990000,  brand="Apple",
+        p4 = Product(name="iPhone X", price=30990000,  brand_id=brand.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p5 = Product(name="iPhone 8", price=21990000,  brand="Apple",
+        p5 = Product(name="iPhone 8", price=21990000,  brand_id=brand.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p6 = Product(name="Samsung Fold", price=3590000,  brand="Samsung",
+        p6 = Product(name="Samsung Fold", price=3590000,  brand_id=brand1.id,cost_price=3000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p7 = Product(name="Oppo 14 Pro Max", price=32990000,  brand="Oppo",
+        p7 = Product(name="Oppo 14 Pro Max", price=32990000,  brand_id=brand2.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p8 = Product(name="Xiaomi 14 Pro Max", price=32990000,  brand="Xiaomi",
+        p8 = Product(name="Xiaomi 14 Pro Max", price=32990000,  brand_id=brand3.id,cost_price=30000000,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
                      dimensions="160.7 x 77.6 x 7.9 mm", release_date=datetime(2022, 9, 16), graphics_card=None,
                      ports="Lightning", warranty="12 tháng")
-        p9 = Product(name="Dell XPS 13 9310", price=34990000,  brand="Dell",
+        p9 = Product(name="Dell XPS 13 9310", price=34990000,  brand_id=brand4.id,cost_price=30000000,stock=10,
                      category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                      screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                      camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                      dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                      graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                      warranty="24 tháng")
-        p10 = Product(name="Gigabyte XPS 13 9310", price=34990000,  brand="Gigabyte",
+        p10 = Product(name="Gigabyte XPS 13 9310", price=34990000,  brand_id=brand5.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p11 = Product(name="Acer XPS 13 9310", price=34990000,  brand="Acer",
+        p11 = Product(name="Acer XPS 13 9310", price=34990000,  brand_id=brand6.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p12 = Product(name="Lenovo XPS 13 9310", price=34990000,  brand="Lenovo",
+        p12 = Product(name="Lenovo XPS 13 9310", price=34990000,  brand_id=brand7.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p13 = Product(name="Macbook XPS 13 9310", price=34990000,  brand="Macbook",
+        p13 = Product(name="Macbook XPS 13 9310", price=34990000,  brand_id=brand8.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p14 = Product(name="Hp XPS 13 9310", price=34990000,  brand="Hp",
+        p14 = Product(name="Hp XPS 13 9310", price=34990000,  brand_id=brand9.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p15 = Product(name="Acer XPS 13 9310", price=34990000,  brand="Acer",
+        p15 = Product(name="Acer XPS 13 9310", price=34990000,  brand_id=brand6.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p16 = Product(name="Asus XPS 14 9310", price=36990000,  brand="Asus",
+        p16 = Product(name="Asus XPS 14 9310", price=36990000,  brand_id=brand11.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",

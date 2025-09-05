@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify,make_response
-from .models import Category, Product,User,UserRole,Order,OrderItem,CartItem,Comment,CommentVote,ProductImage
+from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage, \
+    Brand
 from . import db
 from flask import request
 import uuid
@@ -24,6 +25,19 @@ def get_categories():
     ]
     return jsonify(result)
 
+@main.route("/brands", methods=["GET"])
+def get_brands():
+    brands = Brand.query.all()
+    result = [
+        {
+            "id": b.id,
+            "name": b.name,
+        } for b in brands
+    ]
+    return jsonify(result)
+
+
+
 
 @main.route("/products")
 def get_products():
@@ -37,11 +51,14 @@ def get_products():
             "price": p.price,
             "images": [img.url for img in p.images],
             "category": p.category.name if p.category else None,
-            "brand": p.brand
+            "brand": p.brand.name if p.brand else None,
+            "stock": p.stock
         }
         result.append(product_data)
 
     return jsonify(result)
+
+
 
 
 @main.route("/register", methods=["POST"])
@@ -144,7 +161,7 @@ def get_product_detail(product_id):
         "name": product.name,
         "price": product.price,  # Format tiền tệ
         "images": [img.url for img in product.images],
-        "brand": product.brand,
+        "brand": product.brand.name if product.brand else None,
         "category": product.category.name if product.category else None,
 
         # Thông số kỹ thuật
@@ -582,6 +599,8 @@ def create_product():
         product = Product(
             name=data.get("name"),
             price=float(data.get("price")),
+            cost_price=float(data.get("cost_price")),
+            stock=float(data.get("stock")),
             brand=data.get("brand"),
             category_id=int(data.get("category_id")),
             cpu=data.get("cpu"),
@@ -694,3 +713,185 @@ def delete_product(product_id):
     db.session.commit()
     return jsonify({"message": "Product deleted successfully"})
 
+@main.route('/admin/dashboard')
+def admin_dashboard():
+    total_revenue = db.session.query(func.sum(Order.total_price)).scalar() or 0
+    total_orders = db.session.query(func.count(Order.id)).scalar() or 0
+
+    # Doanh thu theo tháng
+    revenue_by_month = db.session.query(
+        func.date_format(Order.created_at, "%Y-%m"),
+        func.sum(Order.total_price)
+    ).group_by(func.date_format(Order.created_at, "%Y-%m")).all()
+    revenue_by_month = [[r[0], float(r[1])] for r in revenue_by_month]
+
+    # Số lượng đơn hàng theo tháng
+    orders_by_month = db.session.query(
+        func.date_format(Order.created_at, "%Y-%m"),
+        func.count(Order.id)
+    ).group_by(func.date_format(Order.created_at, "%Y-%m")).all()
+    orders_by_month = [[r[0], r[1]] for r in orders_by_month]
+
+    # Số lượng sản phẩm theo brand
+    products_by_brand = db.session.query(
+        Brand.name,
+        func.count(Product.id)
+    ).join(Product, Brand.id == Product.brand_id) \
+        .group_by(Brand.name).all()
+
+    products_by_brand = [[r[0], r[1]] for r in products_by_brand]
+
+    # Số lượng sản phẩm theo category
+    products_by_category = db.session.query(
+        Category.name,
+        func.count(Product.id)
+    ).join(Product, Category.id == Product.category_id) \
+        .group_by(Category.name).all()
+
+    products_by_category = [[r[0], r[1]] for r in products_by_category]
+
+    # Doanh thu theo brand
+    revenue_by_brand = db.session.query(
+        Brand.name,
+        func.sum(OrderItem.quantity * OrderItem.unit_price)
+    ).join(Product, Brand.id == Product.brand_id) \
+        .join(OrderItem, Product.id == OrderItem.product_id) \
+        .join(Order, Order.id == OrderItem.order_id) \
+        .group_by(Brand.name).all()
+
+    revenue_by_brand = [[r[0], float(r[1])] for r in revenue_by_brand]
+
+    # Doanh thu theo category
+    revenue_by_category = db.session.query(
+        Category.name,
+        func.sum(OrderItem.quantity * OrderItem.unit_price)
+    ).join(Product, Category.id == Product.category_id) \
+        .join(OrderItem, Product.id == OrderItem.product_id) \
+        .join(Order, Order.id == OrderItem.order_id) \
+        .group_by(Category.name).all()
+
+    revenue_by_category = [[r[0], float(r[1])] for r in revenue_by_category]
+
+    return jsonify({
+        "total_revenue": float(total_revenue),
+        "total_orders": total_orders,
+        "revenue_by_month": revenue_by_month,
+        "orders_by_month": orders_by_month,
+        "products_by_brand": products_by_brand,
+        "products_by_category": products_by_category,
+        "revenue_by_brand": revenue_by_brand,
+        "revenue_by_category": revenue_by_category
+    })
+
+
+@main.route("/admin/profit")
+@jwt_required()
+def admin_profit():
+    # Tổng doanh thu, chi phí, lợi nhuận
+    totals = db.session.query(
+        func.sum(OrderItem.unit_price * OrderItem.quantity),
+        func.sum(Product.cost_price * OrderItem.quantity),
+        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
+    ).join(Product, Product.id == OrderItem.product_id).one()
+
+    total_revenue = float(totals[0] or 0)
+    total_cost = float(totals[1] or 0)
+    total_profit = float(totals[2] or 0)
+
+    # Theo tháng
+    profit_by_month = db.session.query(
+        func.date_format(Order.created_at, "%m"),
+        func.sum(OrderItem.unit_price * OrderItem.quantity),
+        func.sum(Product.cost_price * OrderItem.quantity),
+        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
+    ).join(OrderItem, Order.id == OrderItem.order_id)\
+     .join(Product, Product.id == OrderItem.product_id)\
+     .group_by(func.date_format(Order.created_at, "%m")).all()
+
+    # Theo brand (join với bảng Brand)
+    profit_by_brand = db.session.query(
+        Brand.name,  # lấy tên brand thay vì id
+        func.sum(OrderItem.unit_price * OrderItem.quantity),
+        func.sum(Product.cost_price * OrderItem.quantity),
+        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
+    ).join(Product, Brand.id == Product.brand_id) \
+        .join(OrderItem, Product.id == OrderItem.product_id) \
+        .group_by(Brand.name).all()
+
+    # Theo category (join bảng Category để lấy tên)
+    profit_by_category = db.session.query(
+        Category.name,
+        func.sum(OrderItem.unit_price * OrderItem.quantity),
+        func.sum(Product.cost_price * OrderItem.quantity),
+        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
+    ).join(Product, Category.id == Product.category_id)\
+     .join(OrderItem, Product.id == OrderItem.product_id)\
+     .group_by(Category.name).all()
+
+    return jsonify({
+        "totals": {
+            "revenue": total_revenue,
+            "cost": total_cost,
+            "profit": total_profit
+        },
+        "profit_by_month": [[str(m), float(r or 0), float(c or 0), float(p or 0)] for m, r, c, p in profit_by_month],
+        "profit_by_brand": [[b or "Không rõ", float(r or 0), float(c or 0), float(p or 0)] for b, r, c, p in profit_by_brand],
+        "profit_by_category": [[cat or "Không rõ", float(r or 0), float(cst or 0), float(p or 0)] for cat, r, cst, p in profit_by_category],
+    })
+
+
+@main.route("/admin/categories", methods=["POST"])
+@jwt_required()
+def create_category():
+    data = request.json
+    if not data.get("name"):
+        return jsonify({"error": "Tên danh mục không được để trống"}), 400
+    c = Category(name=data["name"])
+    db.session.add(c)
+    db.session.commit()
+    return jsonify({"id": c.id, "name": c.name})
+
+@main.route("/admin/categories/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_category(id):
+    c = Category.query.get_or_404(id)
+    data = request.json
+    c.name = data.get("name", c.name)
+    db.session.commit()
+    return jsonify({"id": c.id, "name": c.name})
+
+@main.route("/admin/categories/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_category(id):
+    c = Category.query.get_or_404(id)
+    db.session.delete(c)
+    db.session.commit()
+    return jsonify({"message": "Đã xóa danh mục"})
+
+@main.route("/admin/brands", methods=["POST"])
+@jwt_required()
+def create_brand():
+    data = request.json
+    if not data.get("name"):
+        return jsonify({"error": "Tên brand không được để trống"}), 400
+    b = Brand(name=data["name"])
+    db.session.add(b)
+    db.session.commit()
+    return jsonify({"id": b.id, "name": b.name})
+
+@main.route("/admin/brands/<int:id>", methods=["PUT"])
+@jwt_required()
+def update_brand(id):
+    b = Brand.query.get_or_404(id)
+    data = request.json
+    b.name = data.get("name", b.name)
+    db.session.commit()
+    return jsonify({"id": b.id, "name": b.name})
+
+@main.route("/admin/brands/<int:id>", methods=["DELETE"])
+@jwt_required()
+def delete_brand(id):
+    b = Brand.query.get_or_404(id)
+    db.session.delete(b)
+    db.session.commit()
+    return jsonify({"message": "Đã xóa brand"})
