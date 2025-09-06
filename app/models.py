@@ -9,6 +9,7 @@ import enum
 class UserRole(enum.Enum):
     ADMIN = "ADMIN"
     CUSTOMER = "CUSTOMER"
+    STAFF = "STAFF"
 
 class BaseModel(db.Model):
     __abstract__ = True
@@ -136,6 +137,7 @@ class Comment(BaseModel):
     created_at = db.Column(db.DateTime, default=datetime.now)
     admin_reply = db.Column(db.Text, nullable=True)
     reply_at = db.Column(db.DateTime, nullable=True)
+    reply_role = db.Column(db.String(20), nullable=True)
     product = db.relationship('Product', backref=db.backref('comments', lazy=True))
     user = db.relationship('User', backref=db.backref('comments', lazy=True))
 

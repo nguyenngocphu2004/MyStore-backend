@@ -603,8 +603,8 @@ def admin_login():
     username = data.get("username")
     password = data.get("password")
 
-    user = User.query.filter_by(username=username, role=UserRole.ADMIN).first()
-    if not user or not user.check_password(password) :
+    user = User.query.filter_by(username=username).first()
+    if not user or user.role not in [UserRole.ADMIN, UserRole.STAFF] or not user.check_password(password):
         return jsonify({"error": "Sai username hoặc password"}), 401
 
     token = create_access_token(identity=str(user.id))
@@ -622,9 +622,19 @@ def admin_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+def staff_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        if not user or user.role not in [UserRole.ADMIN, UserRole.STAFF]:
+            return jsonify({"error": "Chỉ admin hoặc nhân viên mới truy cập được"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
 
 @main.route("/admin/users", methods=["GET"])
-@admin_required
+@staff_required
 def get_users():
     users = User.query.all()
     result = []
@@ -636,6 +646,67 @@ def get_users():
             "role": u.role.value
         })
     return jsonify(result)
+
+@main.route("/admin/users", methods=["POST"])
+@admin_required
+def create_user():
+    data = request.json
+    username = data.get("username")
+    email = data.get("email")
+    password = data.get("password")
+    role = data.get("role", "CUSTOMER")
+
+    # Kiểm tra trùng
+    if User.query.filter_by(username=username).first():
+        return jsonify({"error": "Username đã tồn tại"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "Email đã tồn tại"}), 400
+
+    # Tạo user
+    user = User(username=username, email=email, role=role)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role.value
+    }), 201
+
+@main.route("/admin/users/<int:user_id>", methods=["PUT"])
+@staff_required
+def update_user(user_id):
+    current_user_id = get_jwt_identity()
+    current_user = User.query.get(current_user_id)
+    user = User.query.get_or_404(user_id)
+
+    data = request.get_json()
+
+    if current_user.role == UserRole.STAFF and user.role == UserRole.ADMIN:
+        return jsonify({"error": "Không có quyền sửa tài khoản ADMIN"}), 403
+
+    if "username" in data:
+        user.username = data["username"]
+    if "email" in data:
+        user.email = data["email"]
+    if "role" in data:
+        user.role = data["role"]
+    if "password" in data and data["password"].strip():
+        user.set_password(data["password"])
+
+    db.session.commit()
+    return jsonify({"message": "Cập nhật user thành công"}), 200
+
+@main.route("/admin/users/<int:user_id>", methods=["DELETE"])
+@admin_required
+def delete_user(user_id):
+    user = User.query.get_or_404(user_id)
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({"message": "Xóa user thành công"}), 200
+
 
 
 @main.route("/admin/products", methods=["POST"])
@@ -700,7 +771,7 @@ def upload_product_images(product_id):
 from sqlalchemy import func
 
 @main.route("/admin/orders", methods=["GET"])
-@admin_required
+@staff_required
 def admin_get_orders():
     orders = Order.query.order_by(Order.created_at.desc()).all()
     result = []
@@ -724,7 +795,7 @@ def admin_get_orders():
 
 
 @main.route("/admin/orders/<int:order_id>", methods=["GET"])
-@admin_required
+@staff_required
 def admin_get_order_detail(order_id):
     order = Order.query.get_or_404(order_id)
     items = []
@@ -927,7 +998,7 @@ def update_category(id):
     return jsonify({"id": c.id, "name": c.name})
 
 @main.route("/admin/categories/<int:id>", methods=["DELETE"])
-@jwt_required()
+@staff_required
 def delete_category(id):
     c = Category.query.get_or_404(id)
     db.session.delete(c)
@@ -935,7 +1006,7 @@ def delete_category(id):
     return jsonify({"message": "Đã xóa danh mục"})
 
 @main.route("/admin/brands", methods=["POST"])
-@jwt_required()
+@staff_required
 def create_brand():
     data = request.json
     if not data.get("name"):
@@ -946,7 +1017,7 @@ def create_brand():
     return jsonify({"id": b.id, "name": b.name})
 
 @main.route("/admin/brands/<int:id>", methods=["PUT"])
-@jwt_required()
+@staff_required
 def update_brand(id):
     b = Brand.query.get_or_404(id)
     data = request.json
@@ -955,7 +1026,7 @@ def update_brand(id):
     return jsonify({"id": b.id, "name": b.name})
 
 @main.route("/admin/brands/<int:id>", methods=["DELETE"])
-@jwt_required()
+@staff_required
 def delete_brand(id):
     b = Brand.query.get_or_404(id)
     db.session.delete(b)
@@ -963,7 +1034,7 @@ def delete_brand(id):
     return jsonify({"message": "Đã xóa brand"})
 
 @main.route("/comments/<int:comment_id>/reply", methods=["POST"])
-@admin_required
+@staff_required
 def reply_comment(comment_id):
     data = request.json
     reply_content = data.get("content")
@@ -974,16 +1045,38 @@ def reply_comment(comment_id):
     comment = Comment.query.get(comment_id)
     if not comment:
         return jsonify({"error": "Không tìm thấy bình luận"}), 404
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
 
     # Lưu trả lời vào cột admin_reply
     comment.admin_reply = reply_content
     comment.reply_at = datetime.now()
+    comment.reply_role = user.role.value
     db.session.commit()
 
     return jsonify({
         "message": "Trả lời thành công",
         "reply": {
             "admin_reply": comment.admin_reply,
-            "reply_at": time_ago(comment.reply_at)
+            "reply_at": time_ago(comment.reply_at),
+            "reply_role": comment.reply_role
         }
     })
+
+
+@main.route("/admin/sales_by_product", methods=["GET"])
+@staff_required  # cho phép ADMIN + STAFF đều xem
+def sales_by_product():
+    from sqlalchemy import func
+    results = (
+        db.session.query(
+            Product.name,
+            func.sum(OrderItem.quantity).label("total_sold")
+        )
+        .join(OrderItem, Product.id == OrderItem.product_id)
+        .group_by(Product.id)
+        .all()
+    )
+
+    data = [{"name": r[0], "total_sold": int(r[1] or 0)} for r in results]
+    return jsonify(data)
