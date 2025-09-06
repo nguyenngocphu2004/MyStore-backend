@@ -88,20 +88,26 @@ class ProductImage(BaseModel):
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
 
 
+class OrderStatus(enum.Enum):
+    PENDING = "Chưa thanh toán"  # Chưa thanh toán
+    PAID = "Thành công"        # Thanh toán thành công
+    FAILED = "Thanh toán thất bại"    # Thanh toán thất bại
+
+
 class Order(BaseModel):
     __tablename__ = "orders"
 
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)  # có thể là None
     guest_name = db.Column(db.String(100), nullable=True)   # tên khách vãng lai
     guest_phone = db.Column(db.String(20), nullable=True)   # SĐT khách vãng lai
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
     total_price = db.Column(db.Float, nullable=False)
     delivery_method = db.Column(db.String(20), default="store")
+    momo_order_id = db.Column(db.String(36), unique=True, nullable=True)
     address = db.Column(db.String(255), nullable=True)
     items = db.relationship("OrderItem", backref="order", lazy=True)
+    status = db.Column( db.Enum(OrderStatus),default=OrderStatus.PENDING,nullable=False)
 
-    def __str__(self):
-        return self.name
 
 class OrderItem(BaseModel):
     __tablename__ = "order_items"

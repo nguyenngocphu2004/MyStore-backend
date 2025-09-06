@@ -1,19 +1,26 @@
-from flask import Blueprint, jsonify,make_response
-from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage, \
-    Brand
+from flask import Blueprint, jsonify,make_response,request
+from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage,OrderStatus,Brand
 from . import db
-from flask import request
-import uuid
+
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
-import os
+import os, requests
 from .utils import time_ago
 import cloudinary
 import cloudinary.uploader
 from datetime import datetime
+import  hashlib, hmac, uuid
 
 main = Blueprint("main", __name__)
+
+MOMO_PARTNER_CODE = "MOMO"
+MOMO_ACCESS_KEY = "F8BBA842ECF85"
+MOMO_SECRET_KEY = "K951B6PE1waDMi640xX08PD3vg6EkVlz"
+MOMO_ENDPOINT = "https://test-payment.momo.vn/v2/gateway/api/create"
+MOMO_RETURN_URL = "http://localhost:3000/payment-success"
+MOMO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
+
 
 @main.route("/categories", methods=["GET"])
 def get_categories():
@@ -239,7 +246,8 @@ def buy_now():
             guest_phone=guest_phone if not user_id else None,
             total_price=product.price * quantity,
             delivery_method=delivery_method,
-            address=address if delivery_method == "home" else None
+            address=address if delivery_method == "home" else None,
+            status=OrderStatus.PENDING
         )
 
         order_item = OrderItem(
@@ -575,7 +583,12 @@ def vote_comment(comment_id):
 @jwt_required(optional=True)
 def get_orders():
     user_id = get_jwt_identity()
-    orders = Order.query.filter_by(user_id=user_id).order_by(Order.created_at.desc()).all()
+    orders = (
+        Order.query
+        .filter_by(user_id=user_id, status=OrderStatus.PAID)  # chỉ lấy đơn PAID
+        .order_by(Order.created_at.desc())
+        .all()
+    )
 
     result = []
     for o in orders:
@@ -592,10 +605,12 @@ def get_orders():
                 } for d in o.items
             ],
             "delivery_method": o.delivery_method,
-            "address": o.address
+            "address": o.address,
+            "status": o.status.value  # gợi ý: vẫn trả status để frontend có thông tin
         })
 
     return jsonify({"orders": result})
+
 
 @main.route("/admin/login", methods=["POST"])
 def admin_login():
@@ -773,7 +788,7 @@ from sqlalchemy import func
 @main.route("/admin/orders", methods=["GET"])
 @staff_required
 def admin_get_orders():
-    orders = Order.query.order_by(Order.created_at.desc()).all()
+    orders = Order.query.filter_by(status=OrderStatus.PAID).order_by(Order.created_at.desc()).all()
     result = []
     for o in orders:
         result.append({
@@ -788,7 +803,8 @@ def admin_get_orders():
             "total_price": o.total_price,
             "delivery_method": o.delivery_method,
             "address": o.address,
-            "items_count": len(o.items)
+            "items_count": len(o.items),
+            "status": o.status.value
         })
 
     return jsonify(result)
@@ -852,61 +868,65 @@ def delete_product(product_id):
 
 @main.route('/admin/dashboard')
 def admin_dashboard():
-    total_revenue = db.session.query(func.sum(Order.total_price)).scalar() or 0
-    total_orders = db.session.query(func.count(Order.id)).scalar() or 0
+    # Tổng doanh thu chỉ tính các đơn đã thanh toán
+    total_revenue = db.session.query(func.sum(Order.total_price))\
+        .filter(Order.status == 'PAID').scalar() or 0
 
-    # Doanh thu theo tháng
+    # Tổng số đơn hàng đã thanh toán
+    total_orders = db.session.query(func.count(Order.id))\
+        .filter(Order.status == 'PAID').scalar() or 0
+
+    # Doanh thu theo tháng (chỉ đơn đã thanh toán)
     revenue_by_month = db.session.query(
         func.date_format(Order.created_at, "%Y-%m"),
         func.sum(Order.total_price)
-    ).group_by(func.date_format(Order.created_at, "%Y-%m")).all()
+    ).filter(Order.status == 'PAID') \
+     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
     revenue_by_month = [[r[0], float(r[1])] for r in revenue_by_month]
 
-    # Số lượng đơn hàng theo tháng
+    # Số lượng đơn hàng theo tháng (chỉ đơn đã thanh toán)
     orders_by_month = db.session.query(
         func.date_format(Order.created_at, "%Y-%m"),
         func.count(Order.id)
-    ).group_by(func.date_format(Order.created_at, "%Y-%m")).all()
+    ).filter(Order.status == 'PAID') \
+     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
     orders_by_month = [[r[0], r[1]] for r in orders_by_month]
 
-    # Số lượng sản phẩm theo brand
+    # Số lượng sản phẩm theo brand và category thì không cần filter vì đó là sản phẩm
     products_by_brand = db.session.query(
         Brand.name,
         func.count(Product.id)
     ).join(Product, Brand.id == Product.brand_id) \
-        .group_by(Brand.name).all()
-
+     .group_by(Brand.name).all()
     products_by_brand = [[r[0], r[1]] for r in products_by_brand]
 
-    # Số lượng sản phẩm theo category
     products_by_category = db.session.query(
         Category.name,
         func.count(Product.id)
     ).join(Product, Category.id == Product.category_id) \
-        .group_by(Category.name).all()
-
+     .group_by(Category.name).all()
     products_by_category = [[r[0], r[1]] for r in products_by_category]
 
-    # Doanh thu theo brand
+    # Doanh thu theo brand (chỉ đơn đã thanh toán)
     revenue_by_brand = db.session.query(
         Brand.name,
         func.sum(OrderItem.quantity * OrderItem.unit_price)
     ).join(Product, Brand.id == Product.brand_id) \
-        .join(OrderItem, Product.id == OrderItem.product_id) \
-        .join(Order, Order.id == OrderItem.order_id) \
-        .group_by(Brand.name).all()
-
+     .join(OrderItem, Product.id == OrderItem.product_id) \
+     .join(Order, Order.id == OrderItem.order_id) \
+     .filter(Order.status == 'PAID') \
+     .group_by(Brand.name).all()
     revenue_by_brand = [[r[0], float(r[1])] for r in revenue_by_brand]
 
-    # Doanh thu theo category
+    # Doanh thu theo category (chỉ đơn đã thanh toán)
     revenue_by_category = db.session.query(
         Category.name,
         func.sum(OrderItem.quantity * OrderItem.unit_price)
     ).join(Product, Category.id == Product.category_id) \
-        .join(OrderItem, Product.id == OrderItem.product_id) \
-        .join(Order, Order.id == OrderItem.order_id) \
-        .group_by(Category.name).all()
-
+     .join(OrderItem, Product.id == OrderItem.product_id) \
+     .join(Order, Order.id == OrderItem.order_id) \
+     .filter(Order.status == 'PAID') \
+     .group_by(Category.name).all()
     revenue_by_category = [[r[0], float(r[1])] for r in revenue_by_category]
 
     return jsonify({
@@ -920,22 +940,24 @@ def admin_dashboard():
         "revenue_by_category": revenue_by_category
     })
 
-
 @main.route("/admin/profit")
 @jwt_required()
 def admin_profit():
-    # Tổng doanh thu, chi phí, lợi nhuận
+    # Tổng doanh thu, chi phí, lợi nhuận (chỉ đơn đã thanh toán)
     totals = db.session.query(
         func.sum(OrderItem.unit_price * OrderItem.quantity),
         func.sum(Product.cost_price * OrderItem.quantity),
         func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
-    ).join(Product, Product.id == OrderItem.product_id).one()
+    ).join(Product, Product.id == OrderItem.product_id)\
+     .join(Order, Order.id == OrderItem.order_id)\
+     .filter(Order.status == 'PAID')\
+     .one()
 
     total_revenue = float(totals[0] or 0)
     total_cost = float(totals[1] or 0)
     total_profit = float(totals[2] or 0)
 
-    # Theo tháng
+    # Theo tháng (chỉ đơn đã thanh toán)
     profit_by_month = db.session.query(
         func.date_format(Order.created_at, "%m"),
         func.sum(OrderItem.unit_price * OrderItem.quantity),
@@ -943,19 +965,22 @@ def admin_profit():
         func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
     ).join(OrderItem, Order.id == OrderItem.order_id)\
      .join(Product, Product.id == OrderItem.product_id)\
+     .filter(Order.status == 'PAID')\
      .group_by(func.date_format(Order.created_at, "%m")).all()
 
-    # Theo brand (join với bảng Brand)
+    # Theo brand (chỉ đơn đã thanh toán)
     profit_by_brand = db.session.query(
-        Brand.name,  # lấy tên brand thay vì id
+        Brand.name,
         func.sum(OrderItem.unit_price * OrderItem.quantity),
         func.sum(Product.cost_price * OrderItem.quantity),
         func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
     ).join(Product, Brand.id == Product.brand_id) \
-        .join(OrderItem, Product.id == OrderItem.product_id) \
-        .group_by(Brand.name).all()
+     .join(OrderItem, Product.id == OrderItem.product_id) \
+     .join(Order, Order.id == OrderItem.order_id)\
+     .filter(Order.status == 'PAID')\
+     .group_by(Brand.name).all()
 
-    # Theo category (join bảng Category để lấy tên)
+    # Theo category (chỉ đơn đã thanh toán)
     profit_by_category = db.session.query(
         Category.name,
         func.sum(OrderItem.unit_price * OrderItem.quantity),
@@ -963,6 +988,8 @@ def admin_profit():
         func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
     ).join(Product, Category.id == Product.category_id)\
      .join(OrderItem, Product.id == OrderItem.product_id)\
+     .join(Order, Order.id == OrderItem.order_id)\
+     .filter(Order.status == 'PAID')\
      .group_by(Category.name).all()
 
     return jsonify({
@@ -975,7 +1002,6 @@ def admin_profit():
         "profit_by_brand": [[b or "Không rõ", float(r or 0), float(c or 0), float(p or 0)] for b, r, c, p in profit_by_brand],
         "profit_by_category": [[cat or "Không rõ", float(r or 0), float(cst or 0), float(p or 0)] for cat, r, cst, p in profit_by_category],
     })
-
 
 @main.route("/admin/categories", methods=["POST"])
 @jwt_required()
@@ -1080,3 +1106,112 @@ def sales_by_product():
 
     data = [{"name": r[0], "total_sold": int(r[1] or 0)} for r in results]
     return jsonify(data)
+
+
+@main.route("/api/create_momo_payment/<int:order_id>", methods=["POST"])
+def create_momo_payment(order_id):
+    order = Order.query.get_or_404(order_id)
+
+    if order.status != OrderStatus.PENDING:
+        return jsonify({"error": "Đơn hàng đã được thanh toán hoặc hủy"}), 400
+
+    amount = int(order.total_price)
+    order_info = f"Thanh toán đơn hàng #{order.id}"
+    request_id = str(uuid.uuid4())
+    momo_order_id = str(uuid.uuid4())  # orderId riêng cho Momo
+
+    order.momo_order_id = momo_order_id
+    db.session.commit()
+
+    raw_signature = f"accessKey={MOMO_ACCESS_KEY}&amount={amount}&extraData=&ipnUrl={MOMO_NOTIFY_URL}&orderId={momo_order_id}&orderInfo={order_info}&partnerCode={MOMO_PARTNER_CODE}&redirectUrl={MOMO_RETURN_URL}&requestId={request_id}&requestType=captureWallet"
+    signature = hmac.new(bytes(MOMO_SECRET_KEY, 'utf-8'), bytes(raw_signature, 'utf-8'), hashlib.sha256).hexdigest()
+
+    payload = {
+        "partnerCode": MOMO_PARTNER_CODE,
+        "accessKey": MOMO_ACCESS_KEY,
+        "requestId": request_id,
+        "amount": str(amount),
+        "orderId": momo_order_id,
+        "orderInfo": order_info,
+        "redirectUrl": MOMO_RETURN_URL,
+        "ipnUrl": MOMO_NOTIFY_URL,
+        "extraData": "",
+        "requestType": "captureWallet",
+        "signature": signature
+    }
+
+    resp = requests.post(MOMO_ENDPOINT, json=payload)
+    data = resp.json()
+
+    if data.get("payUrl"):
+        return jsonify({"payUrl": data["payUrl"]})
+    else:
+        return jsonify({"error": data.get("message", "Không tạo được link thanh toán")}), 400
+
+
+# Callback từ Momo
+@main.route("/api/payment_callback_confirm/<string:order_id>", methods=["POST"])
+def payment_callback_confirm(order_id):
+    result_code = int(request.args.get("resultCode", -1))
+    order = Order.query.filter_by(momo_order_id=order_id).first()  # vì orderId của Momo là UUID
+    if not order:
+        return jsonify({"error": "Order not found"}), 404
+
+    if order.status == OrderStatus.PENDING:
+        order.status = OrderStatus.PAID if result_code == 0 else OrderStatus.FAILED
+        db.session.commit()
+
+    return jsonify({
+        "orderId": order.id,
+        "status": order.status.value
+    })
+
+
+
+# Lấy thông tin đơn hàng
+@main.route("/orders/<int:order_id>", methods=["GET"])
+def get_order(order_id):
+    order = Order.query.get_or_404(order_id)
+    return jsonify({
+        "id": order.id,
+        "total_price": order.total_price,
+        "status": order.status.value,
+        "items": [
+            {
+                "product_id": item.product_id,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price
+            } for item in order.items
+        ]
+    })
+
+@main.route("/api/create_order_from_cart", methods=["POST"])
+@jwt_required()
+def create_order_from_cart():
+    user_id = get_jwt_identity()
+    cart_items = CartItem.query.filter_by(user_id=user_id).all()
+    if not cart_items:
+        return jsonify({"error": "Giỏ hàng trống"}), 400
+
+    total_price = sum(item.quantity * item.product.price for item in cart_items)
+
+    # Tạo đơn hàng
+    order = Order(user_id=user_id, total_price=total_price, status=OrderStatus.PENDING)
+    db.session.add(order)
+    db.session.flush()  # để lấy order.id
+
+    # Tạo chi tiết đơn hàng
+    for item in cart_items:
+        detail = OrderItem(
+            order_id=order.id,
+            product_id=item.product_id,
+            quantity=item.quantity,
+            unit_price=item.product.price
+        )
+        db.session.add(detail)
+
+    # Xóa giỏ hàng sau khi tạo đơn
+    CartItem.query.filter_by(user_id=user_id).delete()
+    db.session.commit()
+
+    return jsonify({"order_id": order.id, "total_price": total_price}), 201
