@@ -6,7 +6,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
 import os, requests
-from .utils import time_ago
+from .utils import time_ago,send_order_success_email
 import cloudinary
 import cloudinary.uploader
 from datetime import datetime
@@ -49,38 +49,50 @@ def get_brands():
 
 @main.route("/products")
 def get_products():
-    products = Product.query.all()
+    products = (
+        db.session.query(
+            Product,
+            func.coalesce(func.sum(OrderItem.quantity), 0).label("sold")
+        )
+        .outerjoin(OrderItem, OrderItem.product_id == Product.id)
+        .outerjoin(Order, Order.id == OrderItem.order_id)
+        .filter((Order.status == OrderStatus.PAID) | (Order.id == None))  # chỉ tính đơn thành công
+        .group_by(Product.id)
+        .all()
+    )
+
     result = []
-
-    for p in products:
-        product_data = {
+    for p, sold in products:
+        result.append({
             "id": p.id,
-        "name": p.name,
-        "price": p.price,
-        "cost_price": p.cost_price,
-        "stock": p.stock,
-        "category": p.category.name if p.category else None,
-        "brand": p.brand.name if p.brand else None,
-        "images": [img.url for img in p.images],
+            "name": p.name,
+            "price": p.price,
+            "cost_price": p.cost_price,
+            "stock": p.stock,
+            "category": p.category.name if p.category else None,
+            "brand": p.brand.name if p.brand else None,
+            "images": [img.url for img in p.images],
 
-        # Thông số kỹ thuật
-        "cpu": p.cpu,
-        "ram": p.ram,
-        "storage": p.storage,
-        "screen": p.screen,
-        "battery": p.battery,
-        "os": p.os,
-        "camera_front": p.camera_front,
-        "camera_rear": p.camera_rear,
-        "weight": p.weight,
-        "color": p.color,
-        "dimensions": p.dimensions,
-        "release_date": p.release_date.strftime("%Y-%m-%d") if p.release_date else None,
-        "graphics_card": p.graphics_card,
-        "ports": p.ports,
-        "warranty": p.warranty,
-        }
-        result.append(product_data)
+            # Thông số kỹ thuật
+            "cpu": p.cpu,
+            "ram": p.ram,
+            "storage": p.storage,
+            "screen": p.screen,
+            "battery": p.battery,
+            "os": p.os,
+            "camera_front": p.camera_front,
+            "camera_rear": p.camera_rear,
+            "weight": p.weight,
+            "color": p.color,
+            "dimensions": p.dimensions,
+            "release_date": p.release_date.strftime("%Y-%m-%d") if p.release_date else None,
+            "graphics_card": p.graphics_card,
+            "ports": p.ports,
+            "warranty": p.warranty,
+
+            # thêm sold
+            "sold": sold
+        })
 
     return jsonify(result)
 
@@ -179,6 +191,14 @@ def search_products():
 def get_product_detail(product_id):
     product = Product.query.get_or_404(product_id)
 
+    sold = (
+        db.session.query(func.coalesce(func.sum(OrderItem.quantity), 0))
+        .join(Order, Order.id == OrderItem.order_id)
+        .filter(OrderItem.product_id == product.id)
+        .filter(Order.status == OrderStatus.PAID)  # ✅ dùng enum, không dùng string
+        .scalar()
+    )
+
     return jsonify({
         "id": product.id,
         "name": product.name,
@@ -242,6 +262,7 @@ def buy_now():
         quantity = data.get('quantity', 1)
         guest_name = data.get('guest_name')
         guest_phone = data.get('guest_phone')
+        guest_email = data.get('guest_email')
         address = data.get('address')
         delivery_method = data.get('delivery_method', 'store')
 
@@ -261,6 +282,7 @@ def buy_now():
             user_id=user_id,
             guest_name=guest_name if not user_id else None,
             guest_phone=guest_phone if not user_id else None,
+            guest_email=guest_email if not user_id else None,
             total_price=product.price * quantity,
             delivery_method=delivery_method,
             address=address if delivery_method == "home" else None,
@@ -828,7 +850,6 @@ def admin_get_orders():
 
 
 @main.route("/admin/orders/<int:order_id>", methods=["GET"])
-@staff_required
 def admin_get_order_detail(order_id):
     order = Order.query.get_or_404(order_id)
     items = []
@@ -1108,21 +1129,52 @@ def reply_comment(comment_id):
 
 
 @main.route("/admin/sales_by_product", methods=["GET"])
-@staff_required  # cho phép ADMIN + STAFF đều xem
+@staff_required
 def sales_by_product():
     from sqlalchemy import func
+
     results = (
         db.session.query(
+            Product.id,
             Product.name,
-            func.sum(OrderItem.quantity).label("total_sold")
+            Product.stock,
+            func.coalesce(func.sum(OrderItem.quantity), 0).label("total_sold"),
+            Category.name.label("category_name")
         )
-        .join(OrderItem, Product.id == OrderItem.product_id)
-        .group_by(Product.id)
+        .outerjoin(OrderItem, Product.id == OrderItem.product_id)
+        .outerjoin(Order, Order.id == OrderItem.order_id)
+        .outerjoin(Category, Product.category_id == Category.id)
+        .filter((Order.id == None) | (Order.status == OrderStatus.PAID))
+        .group_by(Product.id, Category.name)
         .all()
     )
 
-    data = [{"name": r[0], "total_sold": int(r[1] or 0)} for r in results]
-    return jsonify(data)
+    # Gom sản phẩm theo danh mục
+    categories = {}
+    for r in results:
+        total_sold = int(r[3] or 0)
+        if total_sold >= 50:
+            status = "Bán chạy"
+        elif total_sold >= 20:
+            status = "Bình thường"
+        else:
+            status = "Bán chậm"
+
+        product_data = {
+            "id": r[0],
+            "name": r[1],
+            "stock": r[2],
+            "total_sold": total_sold,
+            "status": status
+        }
+
+        cat_name = r[4] or "Khác"
+        if cat_name not in categories:
+            categories[cat_name] = []
+        categories[cat_name].append(product_data)
+
+    return jsonify(categories)
+
 
 
 @main.route("/api/create_momo_payment/<int:order_id>", methods=["POST"])
@@ -1186,7 +1238,11 @@ def payment_callback_confirm(order_id):
                     product.stock -= item.quantity
                     if product.stock < 0:
                         product.stock = 0  # tránh stock âm
-
+            db.session.commit()
+            if order.user and order.user.email:
+                send_order_success_email(order.user.email, order)
+            elif order.guest_email:
+                send_order_success_email(order.guest_email, order)
         else:
             # Thanh toán thất bại
             order.status = OrderStatus.FAILED

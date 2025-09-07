@@ -7,7 +7,7 @@ from datetime import timedelta
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
-
+from flask_mail import Mail
 class CustomJSONProvider(DefaultJSONProvider):
     def dumps(self, obj, **kwargs):
         kwargs.setdefault("ensure_ascii", False)  # luôn tắt ascii
@@ -25,7 +25,7 @@ cloudinary.config(
 
 
 db = SQLAlchemy()
-
+mail = Mail()
 def create_app():
     app = Flask(__name__)
     app.json = CustomJSONProvider(app)
@@ -36,7 +36,14 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://root:123456@localhost/phustore?charset=utf8mb4"
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = True
 
+    app.config["MAIL_SERVER"] = "smtp.gmail.com"
+    app.config["MAIL_PORT"] = 587
+    app.config["MAIL_USE_TLS"] = True
+    app.config["MAIL_USERNAME"] = "nguyenphu1999f@gmail.com"
+    app.config["MAIL_PASSWORD"] = "auie bsfh mvee mzvf"  # App Password, không phải pass Gmail
+    app.config["MAIL_DEFAULT_SENDER"] = ("FPT Shop", "your_email@gmail.com")
     db.init_app(app)
+    mail.init_app(app)
     CORS(app)
     JWTManager(app)
     from .routes import main

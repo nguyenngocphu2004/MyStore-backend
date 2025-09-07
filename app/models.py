@@ -89,9 +89,9 @@ class ProductImage(BaseModel):
 
 
 class OrderStatus(enum.Enum):
-    PENDING = "Chưa thanh toán"  # Chưa thanh toán
-    PAID = "Thành công"        # Thanh toán thành công
-    FAILED = "Thanh toán thất bại"    # Thanh toán thất bại
+    PENDING = "PENDING"  # Chưa thanh toán
+    PAID = "PAID"        # Thanh toán thành công
+    FAILED = "FAILED"    # Thanh toán thất bại
 
 
 class Order(BaseModel):
@@ -99,7 +99,8 @@ class Order(BaseModel):
 
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)  # có thể là None
     guest_name = db.Column(db.String(100), nullable=True)   # tên khách vãng lai
-    guest_phone = db.Column(db.String(20), nullable=True)   # SĐT khách vãng lai
+    guest_phone = db.Column(db.String(20), nullable=True)
+    guest_email = db.Column(db.String(120),nullable =True)# SĐT khách vãng lai
     created_at = db.Column(db.DateTime, default=datetime.now)
     total_price = db.Column(db.Float, nullable=False)
     delivery_method = db.Column(db.String(20), default="store")
@@ -182,7 +183,7 @@ def seed_data(db):
         db.session.add_all([phone, laptop,brand,brand1,brand2,brand3,brand4,brand5,brand6,brand7,brand8,brand9,brand11])
         db.session.commit()
 
-        p1 = Product(name="iPhone 14 Pro Max", price=32990000, brand_id=brand.id, cost_price=30000000,stock=10,
+        p1 = Product(name="iPhone 14 Pro Max", price=1000, brand_id=brand.id, cost_price=100,stock=10,
                      category_id=phone.id, cpu="Apple A16 Bionic", ram="6GB", storage="256GB",
                      screen="6.7 inch OLED, 2796 x 1290 pixels, 120Hz", battery="4323mAh", os="iOS 16",
                      camera_front="12MP", camera_rear="48MP + 12MP + 12MP", weight="240g", color="Deep Purple",
@@ -272,7 +273,7 @@ def seed_data(db):
                       dimensions="295.7 x 198.7 x 14.8 mm", release_date=datetime(2021, 10, 1),
                       graphics_card="Intel Iris Xe Graphics", ports="2 x Thunderbolt 4, 1 x 3.5mm Audio",
                       warranty="24 tháng")
-        p15 = Product(name="Acer XPS 13 9310", price=34990000,  brand_id=brand6.id,cost_price=30000000,stock=10,
+        p15 = Product(name="Acer XPS 13 9110", price=34990000,  brand_id=brand6.id,cost_price=30000000,stock=10,
                       category_id=laptop.id, cpu="Intel Core i7-1185G7", ram="16GB LPDDR4x", storage="512GB SSD",
                       screen="13.4 inch FHD+ (1920 x 1200), 60Hz", battery="52Wh", os="Windows 11",
                       camera_front="720p HD", camera_rear=None, weight="1.2kg", color="Platinum Silver",
