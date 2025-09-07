@@ -55,17 +55,34 @@ def get_products():
     for p in products:
         product_data = {
             "id": p.id,
-            "name": p.name,
-            "price": p.price,
-            "images": [img.url for img in p.images],
-            "category": p.category.name if p.category else None,
-            "brand": p.brand.name if p.brand else None,
-            "stock": p.stock
+        "name": p.name,
+        "price": p.price,
+        "cost_price": p.cost_price,
+        "stock": p.stock,
+        "category": p.category.name if p.category else None,
+        "brand": p.brand.name if p.brand else None,
+        "images": [img.url for img in p.images],
+
+        # Thông số kỹ thuật
+        "cpu": p.cpu,
+        "ram": p.ram,
+        "storage": p.storage,
+        "screen": p.screen,
+        "battery": p.battery,
+        "os": p.os,
+        "camera_front": p.camera_front,
+        "camera_rear": p.camera_rear,
+        "weight": p.weight,
+        "color": p.color,
+        "dimensions": p.dimensions,
+        "release_date": p.release_date.strftime("%Y-%m-%d") if p.release_date else None,
+        "graphics_card": p.graphics_card,
+        "ports": p.ports,
+        "warranty": p.warranty,
         }
         result.append(product_data)
 
     return jsonify(result)
-
 
 
 
@@ -1158,7 +1175,22 @@ def payment_callback_confirm(order_id):
         return jsonify({"error": "Order not found"}), 404
 
     if order.status == OrderStatus.PENDING:
-        order.status = OrderStatus.PAID if result_code == 0 else OrderStatus.FAILED
+        if result_code == 0:
+            # Thanh toán thành công
+            order.status = OrderStatus.PAID
+
+            # Giảm stock từng sản phẩm
+            for item in order.items:  # giả sử order.items liên kết đến OrderItem
+                product = Product.query.get(item.product_id)
+                if product:
+                    product.stock -= item.quantity
+                    if product.stock < 0:
+                        product.stock = 0  # tránh stock âm
+
+        else:
+            # Thanh toán thất bại
+            order.status = OrderStatus.FAILED
+
         db.session.commit()
 
     return jsonify({
