@@ -5,7 +5,7 @@ from . import db
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
-import os, requests
+import os, requests,openai
 from .utils import time_ago,send_order_success_email
 import cloudinary
 import cloudinary.uploader
@@ -13,6 +13,8 @@ from datetime import datetime
 import  hashlib, hmac, uuid
 
 main = Blueprint("main", __name__)
+
+
 
 MOMO_PARTNER_CODE = "MOMO"
 MOMO_ACCESS_KEY = "F8BBA842ECF85"
@@ -1303,3 +1305,44 @@ def create_order_from_cart():
     db.session.commit()
 
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
+
+
+API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"  # Thay API key thật
+MODEL_NAME = "gemini-2.0-flash"  # Thay model phù hợp bạn lấy được từ listModels
+
+ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+
+@main.route("/api/chatbot", methods=["POST"])
+def chatbot():
+    data = request.get_json()
+    message = data.get("message", "")
+
+    if not message:
+        return jsonify({"error": "Message is required"}), 400
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": message
+                    }
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+
+        data = response.json()
+        reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        return jsonify({"response": reply})
+    except Exception as e:
+        print("Error calling Gemini:", e)
+        return jsonify({"error": "Lỗi server hoặc API key không đúng"}), 500

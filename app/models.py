@@ -471,4 +471,4 @@ if __name__ == "__main__":
     with app.app_context():
         db.create_all()  # tạo bảng
         seed_data(db)      # thêm dữ liệu test
-        print("✅ Database đã tạo và seed dữ liệu thành công!")
+        print("Database đã tạo và seed dữ liệu thành công!")
