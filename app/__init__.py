@@ -8,6 +8,9 @@ import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 from flask_mail import Mail
+from flask_socketio import SocketIO
+
+
 class CustomJSONProvider(DefaultJSONProvider):
     def dumps(self, obj, **kwargs):
         kwargs.setdefault("ensure_ascii", False)  # luôn tắt ascii
@@ -26,6 +29,8 @@ cloudinary.config(
 
 db = SQLAlchemy()
 mail = Mail()
+socketio = SocketIO(cors_allowed_origins="*")
+
 def create_app():
     app = Flask(__name__)
     app.json = CustomJSONProvider(app)
@@ -44,8 +49,11 @@ def create_app():
     app.config["MAIL_DEFAULT_SENDER"] = ("FPT Shop", "your_email@gmail.com")
     db.init_app(app)
     mail.init_app(app)
-    CORS(app)
+    CORS(app, supports_credentials=True)
     JWTManager(app)
+    socketio.init_app(app)
+
     from .routes import main
     app.register_blueprint(main)
+    from . import socket_events
     return app

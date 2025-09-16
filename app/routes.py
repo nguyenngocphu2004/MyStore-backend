@@ -5,7 +5,7 @@ from . import db
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
-import os, requests,openai
+import os, requests
 from .utils import time_ago,send_order_success_email
 import cloudinary
 import cloudinary.uploader
@@ -1346,3 +1346,4 @@ def chatbot():
     except Exception as e:
         print("Error calling Gemini:", e)
         return jsonify({"error": "Lỗi server hoặc API key không đúng"}), 500
+
