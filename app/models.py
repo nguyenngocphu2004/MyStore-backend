@@ -93,6 +93,11 @@ class OrderStatus(enum.Enum):
     PAID = "PAID"        # Thanh toán thành công
     FAILED = "FAILED"    # Thanh toán thất bại
 
+class DeliveryStatus(enum.Enum):
+    PENDING = "PENDING"     # Chưa xử lý giao
+    PROCESSING = "PROCESSING"  # Đang xử lý
+    SHIPPING = "SHIPPING"      # Đang giao
+    DELIVERED = "DELIVERED"    # Đã giao
 
 class Order(BaseModel):
     __tablename__ = "orders"
@@ -108,6 +113,7 @@ class Order(BaseModel):
     address = db.Column(db.String(255), nullable=True)
     items = db.relationship("OrderItem", backref="order", lazy=True)
     status = db.Column( db.Enum(OrderStatus),default=OrderStatus.PENDING,nullable=False)
+    delivery_status = db.Column(db.Enum(DeliveryStatus), default=DeliveryStatus.PENDING, nullable=False)
 
 
 class OrderItem(BaseModel):
@@ -163,6 +169,21 @@ class CommentVote(BaseModel):
 
     user = db.relationship("User", backref="votes")
     comment = db.relationship("Comment", backref="votes")
+
+class OTP(db.Model):
+    __tablename__ = "otps"
+
+    id = db.Column(db.Integer, primary_key=True)
+    phone = db.Column(db.String(20), nullable=False)
+    otp_code = db.Column(db.String(6), nullable=False)
+    expiry = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def is_valid(self, code):
+        return (
+            self.otp_code == code
+            and datetime.now() <= self.expiry
+        )
 
 
 def seed_data(db):

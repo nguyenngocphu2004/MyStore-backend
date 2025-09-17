@@ -1,16 +1,17 @@
 from flask import Blueprint, jsonify,make_response,request
-from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage,OrderStatus,Brand
-from . import db
+from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage,OrderStatus,Brand,OTP,DeliveryStatus
+from . import db,mail
 
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
-import os, requests
+import os, requests, random,smtplib
 from .utils import time_ago,send_order_success_email
 import cloudinary
 import cloudinary.uploader
-from datetime import datetime
+from datetime import datetime,timedelta
 import  hashlib, hmac, uuid
+from flask_mail import Message
 
 main = Blueprint("main", __name__)
 
@@ -406,36 +407,51 @@ def delete_cart_item(item_id):
     db.session.commit()
     return jsonify({"message": "Xóa khỏi giỏ hàng thành công"}), 200
 
-@main.route("/api/orders/guest", methods=["GET"])
+@main.route("/api/orders/guest", methods=["POST"])
 def guest_orders():
-    phone = request.args.get("phone")
-    if not phone:
-        return jsonify({"error": "Vui lòng nhập số điện thoại"}), 400
+    data = request.get_json()
+    print("Dữ liệu nhận từ client:", data)
+    phone = data.get("phone")
+    otp = data.get("otp")
 
-    orders = Order.query.filter_by(guest_phone=phone).all()
+    if not phone or not otp:
+        return jsonify({"error": "Thiếu số điện thoại hoặc OTP"}), 400
+
+    # Kiểm tra OTP trong DB
+    otp_entry = OTP.query.filter_by(phone=phone).first()
+    if not otp_entry or not otp_entry.is_valid(otp):
+        return jsonify({"error": "OTP không hợp lệ hoặc đã hết hạn"}), 400
+
+    # Lấy đơn hàng
+    orders = Order.query.filter_by(guest_phone=phone, status=OrderStatus.PAID).all()
     if not orders:
         return jsonify([])
 
     data = []
     for order in orders:
-        items = [
-            {
-                "product_name": item.product.name,
-                "quantity": item.quantity,
-                "unit_price": item.unit_price
-            }
-            for item in order.items
-        ]
         data.append({
             "id": order.id,
             "total_price": order.total_price,
             "delivery_method": order.delivery_method,
             "address": order.address,
-            "created_at": order.created_at.strftime("%Y-%m-%d %H:%M"),
-            "items": items
+            "created_at": order.created_at,
+            "delivery_status": order.delivery_status.value,
+            "items": [
+                {
+                    "product_name": item.product.name,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price
+                }
+                for item in order.items
+            ]
         })
 
+    # OTP dùng xong thì xóa (chỉ cho dùng 1 lần)
+    db.session.delete(otp_entry)
+    db.session.commit()
+
     return jsonify(data)
+
 
 
 from sqlalchemy import or_
@@ -647,7 +663,8 @@ def get_orders():
             ],
             "delivery_method": o.delivery_method,
             "address": o.address,
-            "status": o.status.value  # gợi ý: vẫn trả status để frontend có thông tin
+            "status": o.status.value,  # gợi ý: vẫn trả status để frontend có thông tin
+            "delivery_status": o.delivery_status.value
         })
 
     return jsonify({"orders": result})
@@ -849,6 +866,25 @@ def admin_get_orders():
         })
 
     return jsonify(result)
+
+
+@main.route("/admin/orders/<int:order_id>/delivery_status", methods=["PUT"])
+@staff_required
+def update_delivery_status(order_id):
+    order = Order.query.get_or_404(order_id)
+    data = request.get_json()
+    new_status = data.get("delivery_status")
+
+    if new_status not in DeliveryStatus.__members__:
+        return jsonify({"error": "Trạng thái giao hàng không hợp lệ"}), 400
+
+    order.delivery_status = DeliveryStatus[new_status]
+    db.session.commit()
+
+    return jsonify({
+        "id": order.id,
+        "delivery_status": order.delivery_status.value
+    })
 
 
 @main.route("/admin/orders/<int:order_id>", methods=["GET"])
@@ -1232,6 +1268,7 @@ def payment_callback_confirm(order_id):
         if result_code == 0:
             # Thanh toán thành công
             order.status = OrderStatus.PAID
+            order.delivery_status = DeliveryStatus.PROCESSING
 
             # Giảm stock từng sản phẩm
             for item in order.items:  # giả sử order.items liên kết đến OrderItem
@@ -1255,6 +1292,7 @@ def payment_callback_confirm(order_id):
         "orderId": order.id,
         "status": order.status.value
     })
+
 
 
 
@@ -1347,3 +1385,41 @@ def chatbot():
         print("Error calling Gemini:", e)
         return jsonify({"error": "Lỗi server hoặc API key không đúng"}), 500
 
+
+@main.route("/api/orders/request-otp", methods=["POST"])
+def request_otp():
+    data = request.get_json()
+    phone = data.get("phone")
+
+    if not phone:
+        return jsonify({"error": "Vui lòng nhập số điện thoại"}), 400
+
+    # Lấy đơn hàng có email theo số điện thoại
+    order = Order.query.filter_by(guest_phone=phone).first()
+    if not order or not order.guest_email:
+        return jsonify({"error": "Không tìm thấy email cho số điện thoại này"}), 404
+
+    email = order.guest_email
+    otp = str(random.randint(100000, 999999))
+    expiry = datetime.now() + timedelta(minutes=5)
+
+    # Xóa OTP cũ
+    OTP.query.filter_by(phone=phone).delete()
+
+    # Lưu OTP mới
+    otp_entry = OTP(phone=phone, otp_code=otp, expiry=expiry)
+    db.session.add(otp_entry)
+    db.session.commit()
+
+    # Gửi email bằng Flask-Mail
+    try:
+        msg = Message(
+            subject="Mã OTP tra cứu đơn hàng",
+            recipients=[email],
+            body=f"Mã OTP của bạn là: {otp}\nMã này có hiệu lực trong 5 phút."
+        )
+        mail.send(msg)
+    except Exception as e:
+        return jsonify({"error": f"Gửi email thất bại: {str(e)}"}), 500
+
+    return jsonify({"message": "OTP đã được gửi đến email"}), 200
