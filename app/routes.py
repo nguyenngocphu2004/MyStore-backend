@@ -1,17 +1,20 @@
-from flask import Blueprint, jsonify,make_response,request
+from flask import Blueprint, jsonify,make_response,request,json
 from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage,OrderStatus,Brand,OTP,DeliveryStatus
 from . import db,mail
 
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_jwt_extended import create_access_token
 from functools import wraps
-import os, requests, random,smtplib
+import os, requests, random, time
 from .utils import time_ago,send_order_success_email
 import cloudinary
 import cloudinary.uploader
 from datetime import datetime,timedelta
 import  hashlib, hmac, uuid
 from flask_mail import Message
+from google.oauth2 import id_token
+from google.auth.transport import requests as grequests
+from werkzeug.security import generate_password_hash
 
 main = Blueprint("main", __name__)
 
@@ -24,6 +27,11 @@ MOMO_ENDPOINT = "https://test-payment.momo.vn/v2/gateway/api/create"
 MOMO_RETURN_URL = "http://localhost:3000/payment-success"
 MOMO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
 
+ZALO_APP_ID = 2554
+ZALO_KEY1 = "sdngKKJmqEMzvh5QQcdD2A9XBSKUNaYn"
+ZALO_KEY2 = "trMrHtvjo6myautxDUiAcYsVtaeQ8nhf"
+ZALO_CREATE_ORDER_URL = "https://sb-openapi.zalopay.vn/v2/create"
+ZALO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
 
 @main.route("/categories", methods=["GET"])
 def get_categories():
@@ -1294,8 +1302,6 @@ def payment_callback_confirm(order_id):
     })
 
 
-
-
 # Lấy thông tin đơn hàng
 @main.route("/orders/<int:order_id>", methods=["GET"])
 def get_order(order_id):
@@ -1345,9 +1351,8 @@ def create_order_from_cart():
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
 
 
-API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"  # Thay API key thật
-MODEL_NAME = "gemini-2.0-flash"  # Thay model phù hợp bạn lấy được từ listModels
-
+API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"
+MODEL_NAME = "gemini-2.0-flash"
 ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
 
 @main.route("/api/chatbot", methods=["POST"])
@@ -1423,3 +1428,193 @@ def request_otp():
         return jsonify({"error": f"Gửi email thất bại: {str(e)}"}), 500
 
     return jsonify({"message": "OTP đã được gửi đến email"}), 200
+
+def make_app_trans_id(order_id):
+    date_str = datetime.now().strftime("%y%m%d")
+    rand_suffix = random.randint(1000, 9999)
+    return f"{date_str}_{order_id}_{rand_suffix}"
+
+@main.route("/api/create_zalopay_payment/<int:order_id>", methods=["POST"])
+def create_zalopay_payment(order_id):
+    order = Order.query.get_or_404(order_id)
+
+    if order.status != OrderStatus.PENDING:
+        return jsonify({"error": "Đơn hàng đã được thanh toán hoặc hủy"}), 400
+
+    app_id = ZALO_APP_ID
+    amount = int(order.total_price)
+    app_user = order.user.email if order.user else order.guest_email or "guest"
+    app_time = int(time.time() * 1000)
+    app_trans_id = make_app_trans_id(order.id)
+
+    # URL redirect sau thanh toán (ZP redirect về đây)
+    redirect_url = "http://localhost:3000/payment-success"  # client-side
+    callback_url = "http://localhost:5000/api/zalopay_ipn"   # server IPN
+
+    # embed_data & item (JSON string)
+    embed_data = json.dumps({
+        "redirecturl": redirect_url
+    }, ensure_ascii=False)
+
+    item = json.dumps([
+        {
+            "itemid": f"order_{order.id}",
+            "itemname": "Đơn hàng",
+            "itemprice": amount,
+            "itemquantity": 1
+        }
+    ], ensure_ascii=False)
+
+    description = f"Thanh toán đơn hàng #{order.id}"
+
+    # Tính MAC theo định dạng yêu cầu
+    mac_data = f"{app_id}|{app_trans_id}|{app_user}|{amount}|{app_time}|{embed_data}|{item}"
+    mac = hmac.new(ZALO_KEY1.encode("utf-8"), mac_data.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    # Payload gửi đến ZaloPay
+    payload = {
+        "app_id": app_id,
+        "app_user": app_user,
+        "app_time": app_time,
+        "amount": amount,
+        "app_trans_id": app_trans_id,
+        "embed_data": embed_data,
+        "item": item,
+        "description": description,
+        "bank_code": "",
+        "callback_url": callback_url,
+        "mac": mac
+    }
+
+    try:
+        response = requests.post(ZALO_CREATE_ORDER_URL, json=payload, timeout=30)
+        result = response.json()
+        print("ZaloPay response:", result)
+    except Exception as e:
+        print("ZaloPay request error:", e)
+        return jsonify({"error": "Lỗi kết nối ZaloPay"}), 500
+
+    if result.get("return_code") == 1:
+        # Lưu thông tin giao dịch nếu cần
+        order.zalopay_app_trans_id = app_trans_id
+        order.zalopay_zp_trans_token = result.get("zp_trans_token")
+        db.session.commit()
+
+        return jsonify({
+            "payUrl": result["order_url"]  # frontend sẽ redirect
+        })
+
+    return jsonify({
+        "error": "Tạo đơn ZaloPay thất bại",
+        "detail": result
+    }), 400
+
+@main.route("/api/zalopay_ipn", methods=["POST"])
+def zalopay_ipn():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        print("IPN Body:", body)
+        data_str = body.get("data", "")
+        req_mac = body.get("mac", "")
+        print(f"Received MAC: {req_mac}")
+
+        mac_calc = hmac.new(ZALO_KEY2.encode("utf-8"), data_str.encode("utf-8"), hashlib.sha256).hexdigest()
+        print(f"Calculated MAC: {mac_calc}")
+
+        if mac_calc != req_mac:
+            print("Invalid MAC")
+            return jsonify({"return_code": -1, "return_message": "invalid mac"}), 400
+
+        data = json.loads(data_str)
+        app_trans_id = data.get("app_trans_id", "")
+        status = str(data.get("status", ""))
+        print(f"Received app_trans_id: {app_trans_id}, status: {status}")
+
+        try:
+            order_id = int(app_trans_id.split("_")[1])
+        except Exception as e:
+            print("Invalid order_id parse:", e)
+            return jsonify({"return_code": -1, "return_message": "invalid order id"}), 400
+
+        order = Order.query.get(order_id)
+        if not order:
+            print(f"Order {order_id} not found")
+            return jsonify({"return_code": -1, "return_message": "order not found"}), 404
+
+        print(f"Order status before update: {order.status}")
+
+        if order.status == OrderStatus.PENDING:
+            if status == "1":
+                order.status = OrderStatus.PAID
+                order.delivery_status = DeliveryStatus.PROCESSING
+
+                for item in order.items:
+                    product = Product.query.get(item.product_id)
+                    if product:
+                        product.stock -= item.quantity
+                        if product.stock < 0:
+                            product.stock = 0
+
+                try:
+                    if order.user and order.user.email:
+                        send_order_success_email(order.user.email, order)
+                    elif order.guest_email:
+                        send_order_success_email(order.guest_email, order)
+                except Exception as e:
+                    print("Email sending failed:", e)
+            else:
+                order.status = OrderStatus.FAILED
+
+            try:
+                db.session.commit()
+                print("DB commit success")
+            except Exception as e:
+                print("DB commit failed:", e)
+                db.session.rollback()
+                return jsonify({"return_code": 0, "return_message": "db commit error"}), 500
+        else:
+            print(f"Order already processed with status: {order.status}")
+
+        print(f"Order status after update: {order.status}")
+        return jsonify({"return_code": 1, "return_message": "OK"})
+
+    except Exception as e:
+        print("IPN error:", e)
+        return jsonify({"return_code": 0, "return_message": "server error"}), 500
+
+
+GOOGLE_CLIENT_ID = "557152661913-55fa8u523grs9oqoid8sk7gc9kj3p0eg.apps.googleusercontent.com"
+
+@main.route("/google-login", methods=["POST"])
+def google_login():
+    data = request.get_json()
+    id_token_received = data.get("id_token")
+    if not id_token_received:
+        return jsonify({"error": "Thiếu id_token"}), 400
+
+    try:
+        idinfo = id_token.verify_oauth2_token(id_token_received, grequests.Request(), GOOGLE_CLIENT_ID)
+        email = idinfo.get("email")
+        sub = idinfo.get("sub")
+
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            user = User(
+                username=email.split("@")[0],
+                email=email,
+                role=UserRole.CUSTOMER,
+                password_hash=generate_password_hash(sub),
+            )
+            db.session.add(user)
+            db.session.commit()
+
+        access_token = create_access_token(identity=user.id)
+
+        return jsonify({
+            "access_token": access_token,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role.value
+        })
+    except ValueError:
+        return jsonify({"error": "Token không hợp lệ"}), 400
