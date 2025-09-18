@@ -60,7 +60,10 @@ def get_brands():
 
 @main.route("/products")
 def get_products():
-    products = (
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 8, type=int)
+
+    query = (
         db.session.query(
             Product,
             func.coalesce(func.sum(OrderItem.quantity), 0).label("sold")
@@ -69,6 +72,13 @@ def get_products():
         .outerjoin(Order, Order.id == OrderItem.order_id)
         .filter((Order.status == OrderStatus.PAID) | (Order.id == None))  # chỉ tính đơn thành công
         .group_by(Product.id)
+    )
+
+    total = query.count()  # tổng số sản phẩm
+    products = (
+        query.order_by(func.rand())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
         .all()
     )
 
@@ -105,8 +115,13 @@ def get_products():
             "sold": sold
         })
 
-    return jsonify(result)
-
+    return jsonify({
+        "products": result,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page
+    })
 
 
 @main.route("/register", methods=["POST"])
@@ -431,7 +446,7 @@ def guest_orders():
         return jsonify({"error": "OTP không hợp lệ hoặc đã hết hạn"}), 400
 
     # Lấy đơn hàng
-    orders = Order.query.filter_by(guest_phone=phone, status=OrderStatus.PAID).all()
+    orders = Order.query.filter_by(guest_phone=phone).all()
     if not orders:
         return jsonify([])
 
@@ -444,6 +459,7 @@ def guest_orders():
             "address": order.address,
             "created_at": order.created_at,
             "delivery_status": order.delivery_status.value,
+            "status": order.status.value,
             "items": [
                 {
                     "product_name": item.product.name,
@@ -529,17 +545,21 @@ def add_comment(product_id):
 
         # Nếu user login
         if user_id:
-            purchased = (
-                db.session.query(OrderItem)
-                .join(Order)
-                .filter(
-                    Order.user_id == user_id,
-                    OrderItem.product_id == product_id,
+            user = User.query.get(user_id)
+            if user.role in [UserRole.ADMIN, UserRole.STAFF]:
+                purchased = True
+            else:
+                purchased = (
+                    db.session.query(OrderItem)
+                    .join(Order)
+                    .filter(
+                        Order.user_id == user_id,
+                        OrderItem.product_id == product_id,
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if not purchased:
-                return jsonify({"error": "Bạn phải mua sản phẩm này mới được bình luận"}), 403
+                if not purchased:
+                    return jsonify({"error": "Bạn phải mua sản phẩm này mới được bình luận"}), 403
 
         # Nếu guest
         else:
@@ -650,7 +670,10 @@ def get_orders():
     user_id = get_jwt_identity()
     orders = (
         Order.query
-        .filter_by(user_id=user_id, status=OrderStatus.PAID)  # chỉ lấy đơn PAID
+        .filter(
+            Order.user_id == user_id,
+            Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING])
+        )
         .order_by(Order.created_at.desc())
         .all()
     )
@@ -854,7 +877,7 @@ from sqlalchemy import func
 @main.route("/admin/orders", methods=["GET"])
 @staff_required
 def admin_get_orders():
-    orders = Order.query.filter_by(status=OrderStatus.PAID).order_by(Order.created_at.desc()).all()
+    orders = Order.query.order_by(Order.created_at.desc()).all()
     result = []
     for o in orders:
         result.append({
@@ -868,6 +891,7 @@ def admin_get_orders():
             "created_at": o.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             "total_price": o.total_price,
             "delivery_method": o.delivery_method,
+            "delivery_status": o.delivery_status.value,
             "address": o.address,
             "items_count": len(o.items),
             "status": o.status.value
@@ -885,6 +909,10 @@ def update_delivery_status(order_id):
 
     if new_status not in DeliveryStatus.__members__:
         return jsonify({"error": "Trạng thái giao hàng không hợp lệ"}), 400
+
+    if new_status == "DELIVERED":
+        return jsonify({"error": "Admin không được phép đặt trạng thái là Đã giao"}), 403
+
 
     order.delivery_status = DeliveryStatus[new_status]
     db.session.commit()
@@ -924,6 +952,7 @@ def admin_get_order_detail(order_id):
         "total_price": order.total_price,
         "delivery_method": order.delivery_method,
         "address": order.address,
+        "delivery_status": order.delivery_status.value,
         "items": items
     })
 
@@ -1265,7 +1294,7 @@ def create_momo_payment(order_id):
 
 
 # Callback từ Momo
-@main.route("/api/payment_callback_confirm/<string:order_id>", methods=["POST"])
+@main.route("/api/payment_callback/<string:order_id>", methods=["POST"])
 def payment_callback_confirm(order_id):
     result_code = int(request.args.get("resultCode", -1))
     order = Order.query.filter_by(momo_order_id=order_id).first()  # vì orderId của Momo là UUID
@@ -1390,49 +1419,110 @@ def chatbot():
         print("Error calling Gemini:", e)
         return jsonify({"error": "Lỗi server hoặc API key không đúng"}), 500
 
+def mask_email(email):
+    parts = email.split("@")
+    if len(parts[0]) <= 3:
+        masked = parts[0][0] + "***"
+    else:
+        masked = parts[0][:3] + "***"
+    return masked + "@" + parts[1]
 
-@main.route("/api/orders/request-otp", methods=["POST"])
+
+
+@main.route("/api/request-otp", methods=["POST"])
 def request_otp():
     data = request.get_json()
     phone = data.get("phone")
+    otp_type = data.get("type", "order_lookup")  # 'password_reset' hoặc 'order_lookup'
 
     if not phone:
         return jsonify({"error": "Vui lòng nhập số điện thoại"}), 400
 
-    # Lấy đơn hàng có email theo số điện thoại
-    order = Order.query.filter_by(guest_phone=phone).first()
-    if not order or not order.guest_email:
-        return jsonify({"error": "Không tìm thấy email cho số điện thoại này"}), 404
+    if otp_type == "password_reset":
+        user = User.query.filter_by(phone=phone).first()
+        if not user or not user.email:
+            return jsonify({"error": "Không tìm thấy email cho số điện thoại này"}), 404
+        email = user.email
+    else:
+        order = Order.query.filter_by(guest_phone=phone).first()
+        if not order or not order.guest_email:
+            return jsonify({"error": "Không tìm thấy email cho số điện thoại này"}), 404
+        email = order.guest_email
 
-    email = order.guest_email
-    otp = str(random.randint(100000, 999999))
+    # Tạo OTP và expiry
+    otp_code = str(random.randint(100000, 999999))
     expiry = datetime.now() + timedelta(minutes=5)
 
-    # Xóa OTP cũ
+    # Xoá OTP cũ nếu có
     OTP.query.filter_by(phone=phone).delete()
 
     # Lưu OTP mới
-    otp_entry = OTP(phone=phone, otp_code=otp, expiry=expiry)
+    otp_entry = OTP(phone=phone, otp_code=otp_code, expiry=expiry)
     db.session.add(otp_entry)
     db.session.commit()
 
-    # Gửi email bằng Flask-Mail
+    # Gửi mail OTP
     try:
         msg = Message(
-            subject="Mã OTP tra cứu đơn hàng",
+            subject="Mã OTP xác thực",
             recipients=[email],
-            body=f"Mã OTP của bạn là: {otp}\nMã này có hiệu lực trong 5 phút."
+            body=f"Mã OTP của bạn là: {otp_code}\nMã có hiệu lực trong 5 phút."
         )
         mail.send(msg)
     except Exception as e:
         return jsonify({"error": f"Gửi email thất bại: {str(e)}"}), 500
 
-    return jsonify({"message": "OTP đã được gửi đến email"}), 200
+    return jsonify({
+        "message": "OTP đã được gửi đến email",
+        "masked_email": mask_email(email)
+    }), 200
 
 def make_app_trans_id(order_id):
     date_str = datetime.now().strftime("%y%m%d")
     rand_suffix = random.randint(1000, 9999)
     return f"{date_str}_{order_id}_{rand_suffix}"
+
+@main.route("/api/verify-otp", methods=["POST"])
+def verify_otp():
+    data = request.get_json()
+    phone = data.get("phone")
+    code = data.get("otp")
+
+    if not phone or not code:
+        return jsonify({"error": "Vui lòng nhập đủ thông tin"}), 400
+
+    otp_entry = OTP.query.filter_by(phone=phone).first()
+    print(f"OTP from DB: {otp_entry.otp_code}, OTP input: {code}")
+    print(f"Now: {datetime.now()}, Expiry: {otp_entry.expiry}")
+    if not otp_entry or not otp_entry.is_valid(code):
+        return jsonify({"error": "Mã OTP không hợp lệ hoặc đã hết hạn"}), 400
+
+    return jsonify({"message": "Xác thực OTP thành công"}), 200
+
+@main.route("/api/reset-password", methods=["POST"])
+def reset_password():
+    data = request.get_json()
+    phone = data.get("phone")
+    otp_code = data.get("otp")
+    new_password = data.get("password")
+
+    if not phone or not otp_code or not new_password:
+        return jsonify({"error": "Vui lòng nhập đủ thông tin"}), 400
+
+    otp_entry = OTP.query.filter_by(phone=phone).first()
+    if not otp_entry or not otp_entry.is_valid(otp_code):
+        return jsonify({"error": "Mã OTP không hợp lệ hoặc đã hết hạn"}), 400
+
+    user = User.query.filter_by(phone=phone).first()
+    if not user:
+        return jsonify({"error": "Người dùng không tồn tại"}), 404
+
+    user.set_password(new_password)
+    db.session.delete(otp_entry)  # Xóa OTP sau khi sử dụng
+    db.session.commit()
+
+    return jsonify({"message": "Đổi mật khẩu thành công"}), 200
+
 
 @main.route("/api/create_zalopay_payment/<int:order_id>", methods=["POST"])
 def create_zalopay_payment(order_id):
@@ -1449,7 +1539,7 @@ def create_zalopay_payment(order_id):
 
     # URL redirect sau thanh toán (ZP redirect về đây)
     redirect_url = "http://localhost:3000/payment-success"  # client-side
-    callback_url = "http://localhost:5000/api/zalopay_ipn"   # server IPN
+    callback_url = "http://localhost:5000/api/update_order_status_callback"  # API mới bạn tạo để xử lý cập nhật
 
     # embed_data & item (JSON string)
     embed_data = json.dumps({
@@ -1495,7 +1585,6 @@ def create_zalopay_payment(order_id):
         return jsonify({"error": "Lỗi kết nối ZaloPay"}), 500
 
     if result.get("return_code") == 1:
-        # Lưu thông tin giao dịch nếu cần
         order.zalopay_app_trans_id = app_trans_id
         order.zalopay_zp_trans_token = result.get("zp_trans_token")
         db.session.commit()
@@ -1509,78 +1598,7 @@ def create_zalopay_payment(order_id):
         "detail": result
     }), 400
 
-@main.route("/api/zalopay_ipn", methods=["POST"])
-def zalopay_ipn():
-    try:
-        body = request.get_json(force=True, silent=True) or {}
-        print("IPN Body:", body)
-        data_str = body.get("data", "")
-        req_mac = body.get("mac", "")
-        print(f"Received MAC: {req_mac}")
 
-        mac_calc = hmac.new(ZALO_KEY2.encode("utf-8"), data_str.encode("utf-8"), hashlib.sha256).hexdigest()
-        print(f"Calculated MAC: {mac_calc}")
-
-        if mac_calc != req_mac:
-            print("Invalid MAC")
-            return jsonify({"return_code": -1, "return_message": "invalid mac"}), 400
-
-        data = json.loads(data_str)
-        app_trans_id = data.get("app_trans_id", "")
-        status = str(data.get("status", ""))
-        print(f"Received app_trans_id: {app_trans_id}, status: {status}")
-
-        try:
-            order_id = int(app_trans_id.split("_")[1])
-        except Exception as e:
-            print("Invalid order_id parse:", e)
-            return jsonify({"return_code": -1, "return_message": "invalid order id"}), 400
-
-        order = Order.query.get(order_id)
-        if not order:
-            print(f"Order {order_id} not found")
-            return jsonify({"return_code": -1, "return_message": "order not found"}), 404
-
-        print(f"Order status before update: {order.status}")
-
-        if order.status == OrderStatus.PENDING:
-            if status == "1":
-                order.status = OrderStatus.PAID
-                order.delivery_status = DeliveryStatus.PROCESSING
-
-                for item in order.items:
-                    product = Product.query.get(item.product_id)
-                    if product:
-                        product.stock -= item.quantity
-                        if product.stock < 0:
-                            product.stock = 0
-
-                try:
-                    if order.user and order.user.email:
-                        send_order_success_email(order.user.email, order)
-                    elif order.guest_email:
-                        send_order_success_email(order.guest_email, order)
-                except Exception as e:
-                    print("Email sending failed:", e)
-            else:
-                order.status = OrderStatus.FAILED
-
-            try:
-                db.session.commit()
-                print("DB commit success")
-            except Exception as e:
-                print("DB commit failed:", e)
-                db.session.rollback()
-                return jsonify({"return_code": 0, "return_message": "db commit error"}), 500
-        else:
-            print(f"Order already processed with status: {order.status}")
-
-        print(f"Order status after update: {order.status}")
-        return jsonify({"return_code": 1, "return_message": "OK"})
-
-    except Exception as e:
-        print("IPN error:", e)
-        return jsonify({"return_code": 0, "return_message": "server error"}), 500
 
 
 GOOGLE_CLIENT_ID = "557152661913-55fa8u523grs9oqoid8sk7gc9kj3p0eg.apps.googleusercontent.com"
@@ -1618,3 +1636,68 @@ def google_login():
         })
     except ValueError:
         return jsonify({"error": "Token không hợp lệ"}), 400
+
+@main.route("/api/pay_cod/<int:order_id>", methods=["POST"])
+def pay_cod(order_id):
+    order = Order.query.get(order_id)
+
+    if not order:
+        return jsonify({"error": "Không tìm thấy đơn hàng"}), 404
+
+    if order.status != OrderStatus.PENDING:
+        return jsonify({"error": "Đơn hàng đã được thanh toán hoặc đang xử lý"}), 400
+
+    # Cập nhật trạng thái thanh toán và giao hàng
+    order.status = OrderStatus.PENDING
+    order.delivery_status = DeliveryStatus.PENDING
+
+    try:
+        db.session.commit()
+        return jsonify({"message": "Thanh toán COD thành công. Đơn hàng đang được xử lý."}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Không thể xác nhận đơn hàng"}), 500
+
+@main.route("/admin/orders/<int:order_id>/payment_status", methods=["PUT"])
+@staff_required
+def update_payment_status(order_id):
+    order = Order.query.get_or_404(order_id)
+    data = request.get_json()
+    new_status = data.get("status")  # hoặc "payment_status" nếu bạn muốn
+    if order.delivery_status == DeliveryStatus.DELIVERED:
+        return jsonify({"error": "Đơn hàng đã được giao, không thể thay đổi trạng thái"}), 400
+    if new_status == "DELIVERED":
+        return jsonify({"error": "Admin không được phép đặt trạng thái là Đã giao"}), 403
+
+    if new_status not in OrderStatus.__members__:
+        return jsonify({"error": "Trạng thái thanh toán không hợp lệ"}), 400
+
+    order.status = OrderStatus[new_status]
+    db.session.commit()
+
+    return jsonify({
+        "id": order.id,
+        "status": order.status.value
+    })
+
+@main.route("/orders/<int:order_id>/confirm_received", methods=["PUT"])
+@jwt_required()
+def user_confirm_received(order_id):
+    user_id = get_jwt_identity()
+    order = Order.query.filter_by(id=order_id).first_or_404()
+    print(f"user_id from token: {user_id}, order.user_id: {order.user_id}")
+
+    if int(user_id) != order.user_id:
+        return jsonify({"error": "Không có quyền xác nhận đơn hàng này"}), 403
+
+    if order.delivery_status != DeliveryStatus.SHIPPING:
+        return jsonify({"error": "Đơn hàng chưa ở trạng thái đang giao"}), 400
+
+    if order.status != OrderStatus.PAID:
+        return jsonify({"error": "Đơn hàng chưa thanh toán"}), 400
+
+    order.delivery_status = DeliveryStatus.DELIVERED
+    db.session.commit()
+
+    return jsonify({"message": "Xác nhận đã nhận hàng thành công"})
+

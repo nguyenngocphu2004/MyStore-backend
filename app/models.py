@@ -177,14 +177,13 @@ class OTP(db.Model):
     phone = db.Column(db.String(20), nullable=False)
     otp_code = db.Column(db.String(6), nullable=False)
     expiry = db.Column(db.DateTime, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
     def is_valid(self, code):
         return (
             self.otp_code == code
             and datetime.now() <= self.expiry
         )
-
 
 def seed_data(db):
     if not Category.query.first():
