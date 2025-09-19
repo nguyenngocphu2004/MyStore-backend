@@ -4,7 +4,7 @@ from .models import (Category, Product, User, UserRole, Order, OrderItem, CartIt
 from . import db,mail
 from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
-import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
+import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid,re
 from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required
 from datetime import datetime,timedelta
 from flask_mail import Message
@@ -143,7 +143,20 @@ def register():
     if not username or not email or not password or not phone:
         return jsonify({"error": "Vui lòng nhập đầy đủ thông tin"}), 400
 
-    # Kiểm tra username/email trùng
+    # Kiểm tra mật khẩu tối thiểu 8 ký tự
+    if len(password) < 8:
+        return jsonify({"error": "Mật khẩu phải có ít nhất 8 ký tự"}), 400
+
+    # Kiểm tra định dạng email cơ bản
+    email_regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    if not re.match(email_regex, email):
+        return jsonify({"error": "Email không hợp lệ"}), 400
+
+    # Kiểm tra định dạng số điện thoại (10 số)
+    if not re.match(r'^\d{10}$', phone):
+        return jsonify({"error": "Số điện thoại phải gồm 10 chữ số"}), 400
+
+    # Kiểm tra username/email/phone đã tồn tại chưa
     if User.query.filter_by(username=username).first():
         return jsonify({"error": "Tên đăng nhập đã tồn tại"}), 400
 
@@ -1060,40 +1073,16 @@ def admin_profit():
     total_cost = float(totals[1] or 0)
     total_profit = float(totals[2] or 0)
 
-    # Theo tháng (chỉ đơn đã thanh toán)
+    # Theo tháng (đã sửa lấy năm-tháng đầy đủ)
     profit_by_month = db.session.query(
-        func.date_format(Order.created_at, "%m"),
+        func.date_format(Order.created_at, "%Y-%m"),
         func.sum(OrderItem.unit_price * OrderItem.quantity),
         func.sum(Product.cost_price * OrderItem.quantity),
         func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
     ).join(OrderItem, Order.id == OrderItem.order_id)\
      .join(Product, Product.id == OrderItem.product_id)\
      .filter(Order.status == 'PAID')\
-     .group_by(func.date_format(Order.created_at, "%m")).all()
-
-    # Theo brand (chỉ đơn đã thanh toán)
-    profit_by_brand = db.session.query(
-        Brand.name,
-        func.sum(OrderItem.unit_price * OrderItem.quantity),
-        func.sum(Product.cost_price * OrderItem.quantity),
-        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
-    ).join(Product, Brand.id == Product.brand_id) \
-     .join(OrderItem, Product.id == OrderItem.product_id) \
-     .join(Order, Order.id == OrderItem.order_id)\
-     .filter(Order.status == 'PAID')\
-     .group_by(Brand.name).all()
-
-    # Theo category (chỉ đơn đã thanh toán)
-    profit_by_category = db.session.query(
-        Category.name,
-        func.sum(OrderItem.unit_price * OrderItem.quantity),
-        func.sum(Product.cost_price * OrderItem.quantity),
-        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
-    ).join(Product, Category.id == Product.category_id)\
-     .join(OrderItem, Product.id == OrderItem.product_id)\
-     .join(Order, Order.id == OrderItem.order_id)\
-     .filter(Order.status == 'PAID')\
-     .group_by(Category.name).all()
+     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
 
     return jsonify({
         "totals": {
@@ -1102,8 +1091,6 @@ def admin_profit():
             "profit": total_profit
         },
         "profit_by_month": [[str(m), float(r or 0), float(c or 0), float(p or 0)] for m, r, c, p in profit_by_month],
-        "profit_by_brand": [[b or "Không rõ", float(r or 0), float(c or 0), float(p or 0)] for b, r, c, p in profit_by_brand],
-        "profit_by_category": [[cat or "Không rõ", float(r or 0), float(cst or 0), float(p or 0)] for cat, r, cst, p in profit_by_category],
     })
 
 @main.route("/admin/categories", methods=["POST"])
@@ -1343,33 +1330,57 @@ def get_order(order_id):
 @jwt_required()
 def create_order_from_cart():
     user_id = get_jwt_identity()
-    cart_items = CartItem.query.filter_by(user_id=user_id).all()
-    if not cart_items:
-        return jsonify({"error": "Giỏ hàng trống"}), 400
+    data = request.get_json()
 
-    total_price = sum(item.quantity * item.product.price for item in cart_items)
+    if not data:
+        return jsonify({"error": "Dữ liệu không hợp lệ"}), 400
+
+    selected_products = data.get("products")
+
+    if len(selected_products) == 0:
+        return jsonify({"error": "Danh sách sản phẩm rỗng"}), 400
+
+    product_ids = [item["product_id"] for item in selected_products]
+    products = Product.query.filter(Product.id.in_(product_ids)).all()
+    product_map = {p.id: p for p in products}
+
+    total_price = 0
+    for item in selected_products:
+        pid = item["product_id"]
+        quantity = item["quantity"]
+        product = product_map.get(pid)
+        if not product:
+            return jsonify({"error": f"Sản phẩm ID {pid} không tồn tại"}), 400
+        total_price += quantity * product.price
 
     # Tạo đơn hàng
-    order = Order(user_id=user_id, total_price=total_price, status=OrderStatus.PENDING)
+    order = Order(
+        user_id=user_id,
+        total_price=total_price,
+        status=OrderStatus.PENDING,
+        order_code=generate_unique_order_code(),
+    )
+
     db.session.add(order)
     db.session.flush()  # để lấy order.id
 
-    # Tạo chi tiết đơn hàng
-    for item in cart_items:
-        detail = OrderItem(
+    # Tạo từng chi tiết đơn hàng
+    for item in selected_products:
+        product = product_map[item["product_id"]]
+        order_item = OrderItem(
             order_id=order.id,
-            product_id=item.product_id,
-            quantity=item.quantity,
-            unit_price=item.product.price
+            product_id=product.id,
+            quantity=item["quantity"],
+            unit_price=product.price
         )
-        db.session.add(detail)
+        db.session.add(order_item)
 
-    # Xóa giỏ hàng sau khi tạo đơn
-    CartItem.query.filter_by(user_id=user_id).delete()
+    CartItem.query.filter(
+        CartItem.user_id == user_id,
+        CartItem.product_id.in_(product_ids)
+    ).delete(synchronize_session=False)
     db.session.commit()
-
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
-
 
 @main.route("/api/chatbot", methods=["POST"])
 def chatbot():
