@@ -4,8 +4,6 @@ from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from datetime import timedelta
-import cloudinary
-import cloudinary.uploader
 import cloudinary.api
 from flask_mail import Mail
 from flask_socketio import SocketIO

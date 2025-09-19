@@ -1,23 +1,26 @@
 from flask import Blueprint, jsonify,make_response,request,json
-from .models import Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote, ProductImage,OrderStatus,Brand,OTP,DeliveryStatus
+from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
+                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus)
 from . import db,mail
-
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from flask_jwt_extended import create_access_token
-from functools import wraps
-import os, requests, random, time
-from .utils import time_ago,send_order_success_email
-import cloudinary
-import cloudinary.uploader
+from sqlalchemy import case,func
+from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
+import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
+from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required
 from datetime import datetime,timedelta
-import  hashlib, hmac, uuid
 from flask_mail import Message
 from google.oauth2 import id_token
 from google.auth.transport import requests as grequests
 from werkzeug.security import generate_password_hash
 
+UPLOAD_FOLDER = "static/uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 main = Blueprint("main", __name__)
 
+GOOGLE_CLIENT_ID = "557152661913-55fa8u523grs9oqoid8sk7gc9kj3p0eg.apps.googleusercontent.com"
+
+API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"
+MODEL_NAME = "gemini-2.0-flash"
+ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
 
 
 MOMO_PARTNER_CODE = "MOMO"
@@ -33,6 +36,7 @@ ZALO_KEY2 = "trMrHtvjo6myautxDUiAcYsVtaeQ8nhf"
 ZALO_CREATE_ORDER_URL = "https://sb-openapi.zalopay.vn/v2/create"
 ZALO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
 
+
 @main.route("/categories", methods=["GET"])
 def get_categories():
     categories = Category.query.all()
@@ -43,6 +47,7 @@ def get_categories():
         } for c in categories
     ]
     return jsonify(result)
+
 
 @main.route("/brands", methods=["GET"])
 def get_brands():
@@ -56,8 +61,6 @@ def get_brands():
     return jsonify(result)
 
 
-
-
 @main.route("/products")
 def get_products():
     page = request.args.get("page", 1, type=int)
@@ -66,15 +69,22 @@ def get_products():
     query = (
         db.session.query(
             Product,
-            func.coalesce(func.sum(OrderItem.quantity), 0).label("sold")
+            func.coalesce(
+                func.sum(
+                    case(
+                        (Order.status == OrderStatus.PAID, OrderItem.quantity),  # chỉ cộng nếu đơn đã thanh toán
+                        else_=0
+                    )
+                ),
+                0
+            ).label("sold")
         )
         .outerjoin(OrderItem, OrderItem.product_id == Product.id)
         .outerjoin(Order, Order.id == OrderItem.order_id)
-        .filter((Order.status == OrderStatus.PAID) | (Order.id == None))  # chỉ tính đơn thành công
         .group_by(Product.id)
     )
 
-    total = query.count()  # tổng số sản phẩm
+    total = query.count()
     products = (
         query.order_by(func.rand())
         .offset((page - 1) * per_page)
@@ -93,8 +103,6 @@ def get_products():
             "category": p.category.name if p.category else None,
             "brand": p.brand.name if p.brand else None,
             "images": [img.url for img in p.images],
-
-            # Thông số kỹ thuật
             "cpu": p.cpu,
             "ram": p.ram,
             "storage": p.storage,
@@ -110,8 +118,6 @@ def get_products():
             "graphics_card": p.graphics_card,
             "ports": p.ports,
             "warranty": p.warranty,
-
-            # thêm sold
             "sold": sold
         })
 
@@ -161,7 +167,6 @@ def register():
     return jsonify({"message": "Đăng ký thành công"}), 201
 
 
-
 @main.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -194,6 +199,7 @@ def profile():
         "phone": user.phone
     }), 200
 
+
 @main.route("/products/search", methods=["GET"])
 def search_products():
     keyword = request.args.get("q", "").strip()
@@ -212,6 +218,7 @@ def search_products():
         }
         for p in results
     ])
+
 
 @main.route("/products/<int:product_id>")
 def get_product_detail(product_id):
@@ -250,6 +257,7 @@ def get_product_detail(product_id):
         "ports": product.ports,
         "warranty": product.warranty
     })
+
 
 @main.route("/profile", methods=["PUT"])
 @jwt_required()
@@ -312,6 +320,7 @@ def buy_now():
             total_price=product.price * quantity,
             delivery_method=delivery_method,
             address=address if delivery_method == "home" else None,
+            order_code=generate_unique_order_code(),
             status=OrderStatus.PENDING
         )
 
@@ -349,6 +358,7 @@ def buy_now():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
 
 @main.route("/cart", methods=["GET"])
 @jwt_required()
@@ -415,7 +425,6 @@ def update_cart_item(product_id):
     return jsonify({"message": "Cập nhật số lượng thành công"}), 200
 
 
-
 @main.route("/cart/delete/<int:item_id>", methods=["DELETE"])
 @jwt_required()
 def delete_cart_item(item_id):
@@ -470,15 +479,10 @@ def guest_orders():
             ]
         })
 
-    # OTP dùng xong thì xóa (chỉ cho dùng 1 lần)
     db.session.delete(otp_entry)
     db.session.commit()
-
     return jsonify(data)
 
-
-
-from sqlalchemy import or_
 
 @main.route('/products/<int:product_id>/comments', methods=['GET'])
 @jwt_required(optional=True)
@@ -528,7 +532,6 @@ def get_comments(product_id):
     })
 
 
-
 @main.route('/products/<int:product_id>/comments', methods=['POST'])
 @jwt_required(optional=True)  # cho phép guest
 def add_comment(product_id):
@@ -542,7 +545,6 @@ def add_comment(product_id):
         user_id = get_jwt_identity()
         guest_name = data.get("guest_name")
         guest_phone = data.get("guest_phone")
-
         # Nếu user login
         if user_id:
             user = User.query.get(user_id)
@@ -560,8 +562,6 @@ def add_comment(product_id):
                 )
                 if not purchased:
                     return jsonify({"error": "Bạn phải mua sản phẩm này mới được bình luận"}), 403
-
-        # Nếu guest
         else:
             if not guest_name or not guest_phone:
                 return jsonify({"error": "Khách vãng lai phải nhập họ tên và số điện thoại"}), 400
@@ -607,7 +607,6 @@ def add_comment(product_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
-
 
 
 @main.route("/comments/<int:comment_id>/vote", methods=["POST"])
@@ -658,8 +657,8 @@ def vote_comment(comment_id):
         resp.set_cookie("session_id",
         session_id,
         httponly=True,
-        max_age=60*60*24*30,  # 30 ngày
-        samesite="None",      # 👈 cho phép cross-site
+        max_age=60*60*24*30,
+        samesite="None",
         secure=False)
 
     return resp
@@ -672,7 +671,7 @@ def get_orders():
         Order.query
         .filter(
             Order.user_id == user_id,
-            Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING])
+            Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING,OrderStatus.CANCELED]),
         )
         .order_by(Order.created_at.desc())
         .all()
@@ -695,7 +694,9 @@ def get_orders():
             "delivery_method": o.delivery_method,
             "address": o.address,
             "status": o.status.value,  # gợi ý: vẫn trả status để frontend có thông tin
-            "delivery_status": o.delivery_status.value
+            "delivery_status": o.delivery_status.value,
+            "payment_method": o.payment_method,
+            "order_code": o.order_code
         })
 
     return jsonify({"orders": result})
@@ -714,28 +715,6 @@ def admin_login():
     token = create_access_token(identity=str(user.id))
     return jsonify({"token": token, "username": user.username, "role": user.role.value})
 
-
-def admin_required(fn):
-    @wraps(fn)
-    @jwt_required()
-    def wrapper(*args, **kwargs):
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
-        if not user or user.role != UserRole.ADMIN:
-            return jsonify({"error": "Chỉ admin mới truy cập được"}), 403
-        return fn(*args, **kwargs)
-    return wrapper
-
-def staff_required(fn):
-    @wraps(fn)
-    @jwt_required()
-    def wrapper(*args, **kwargs):
-        user_id = get_jwt_identity()
-        user = User.query.get(user_id)
-        if not user or user.role not in [UserRole.ADMIN, UserRole.STAFF]:
-            return jsonify({"error": "Chỉ admin hoặc nhân viên mới truy cập được"}), 403
-        return fn(*args, **kwargs)
-    return wrapper
 
 @main.route("/admin/users", methods=["GET"])
 @staff_required
@@ -872,12 +851,15 @@ def upload_product_images(product_id):
     return jsonify({"message": "Images uploaded", "urls": uploaded_urls}), 201
 
 
-from sqlalchemy import func
-
 @main.route("/admin/orders", methods=["GET"])
 @staff_required
 def admin_get_orders():
-    orders = Order.query.order_by(Order.created_at.desc()).all()
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 10, type=int)
+
+    pagination = Order.query.order_by(Order.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    orders = pagination.items
+
     result = []
     for o in orders:
         result.append({
@@ -894,11 +876,17 @@ def admin_get_orders():
             "delivery_status": o.delivery_status.value,
             "address": o.address,
             "items_count": len(o.items),
-            "status": o.status.value
+            "status": o.status.value,
+            "payment_method": o.payment_method,
+            "order_code": o.order_code
         })
 
-    return jsonify(result)
-
+    return jsonify({
+        "orders": result,
+        "page": pagination.page,
+        "pages": pagination.pages,
+        "total": pagination.total
+    })
 
 @main.route("/admin/orders/<int:order_id>/delivery_status", methods=["PUT"])
 @staff_required
@@ -953,7 +941,9 @@ def admin_get_order_detail(order_id):
         "delivery_method": order.delivery_method,
         "address": order.address,
         "delivery_status": order.delivery_status.value,
-        "items": items
+        "items": items,
+        "payment_method": order.payment_method,
+        "order_code": order.order_code
     })
 
 
@@ -1255,7 +1245,8 @@ def sales_by_product():
 @main.route("/api/create_momo_payment/<int:order_id>", methods=["POST"])
 def create_momo_payment(order_id):
     order = Order.query.get_or_404(order_id)
-
+    order.payment_method = "MOMO"
+    db.session.commit()
     if order.status != OrderStatus.PENDING:
         return jsonify({"error": "Đơn hàng đã được thanh toán hoặc hủy"}), 400
 
@@ -1380,10 +1371,6 @@ def create_order_from_cart():
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
 
 
-API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"
-MODEL_NAME = "gemini-2.0-flash"
-ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
-
 @main.route("/api/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
@@ -1426,7 +1413,6 @@ def mask_email(email):
     else:
         masked = parts[0][:3] + "***"
     return masked + "@" + parts[1]
-
 
 
 @main.route("/api/request-otp", methods=["POST"])
@@ -1482,6 +1468,7 @@ def make_app_trans_id(order_id):
     rand_suffix = random.randint(1000, 9999)
     return f"{date_str}_{order_id}_{rand_suffix}"
 
+
 @main.route("/api/verify-otp", methods=["POST"])
 def verify_otp():
     data = request.get_json()
@@ -1498,6 +1485,7 @@ def verify_otp():
         return jsonify({"error": "Mã OTP không hợp lệ hoặc đã hết hạn"}), 400
 
     return jsonify({"message": "Xác thực OTP thành công"}), 200
+
 
 @main.route("/api/reset-password", methods=["POST"])
 def reset_password():
@@ -1527,7 +1515,8 @@ def reset_password():
 @main.route("/api/create_zalopay_payment/<int:order_id>", methods=["POST"])
 def create_zalopay_payment(order_id):
     order = Order.query.get_or_404(order_id)
-
+    order.payment_method = "ZALOPAY"
+    db.session.commit()
     if order.status != OrderStatus.PENDING:
         return jsonify({"error": "Đơn hàng đã được thanh toán hoặc hủy"}), 400
 
@@ -1599,10 +1588,6 @@ def create_zalopay_payment(order_id):
     }), 400
 
 
-
-
-GOOGLE_CLIENT_ID = "557152661913-55fa8u523grs9oqoid8sk7gc9kj3p0eg.apps.googleusercontent.com"
-
 @main.route("/google-login", methods=["POST"])
 def google_login():
     data = request.get_json()
@@ -1640,7 +1625,8 @@ def google_login():
 @main.route("/api/pay_cod/<int:order_id>", methods=["POST"])
 def pay_cod(order_id):
     order = Order.query.get(order_id)
-
+    order.payment_method = "COD"
+    db.session.commit()
     if not order:
         return jsonify({"error": "Không tìm thấy đơn hàng"}), 404
 
@@ -1680,12 +1666,12 @@ def update_payment_status(order_id):
         "status": order.status.value
     })
 
+
 @main.route("/orders/<int:order_id>/confirm_received", methods=["PUT"])
 @jwt_required()
 def user_confirm_received(order_id):
     user_id = get_jwt_identity()
     order = Order.query.filter_by(id=order_id).first_or_404()
-    print(f"user_id from token: {user_id}, order.user_id: {order.user_id}")
 
     if int(user_id) != order.user_id:
         return jsonify({"error": "Không có quyền xác nhận đơn hàng này"}), 403
@@ -1696,8 +1682,31 @@ def user_confirm_received(order_id):
     if order.status != OrderStatus.PAID:
         return jsonify({"error": "Đơn hàng chưa thanh toán"}), 400
 
+    # Trừ stock cho từng sản phẩm trong đơn
+    for item in order.items:
+        product = item.product
+        if product.stock < item.quantity:
+            return jsonify({"error": f"Sản phẩm '{product.name}' không đủ hàng tồn kho"}), 400
+        product.stock -= item.quantity
+
     order.delivery_status = DeliveryStatus.DELIVERED
     db.session.commit()
 
-    return jsonify({"message": "Xác nhận đã nhận hàng thành công"})
+    return jsonify({"message": "Xác nhận đã nhận hàng thành công và trừ kho thành công"})
 
+
+@main.route("/orders/<int:order_id>/cancel", methods=["PUT"])
+@jwt_required()
+def cancel_order(order_id):
+    user_id = get_jwt_identity()
+    order = Order.query.filter_by(id=order_id, user_id=user_id).first()
+
+    if not order:
+        return jsonify({"error": "Đơn hàng không tồn tại"}), 404
+
+    if order.status != OrderStatus.PENDING:
+        return jsonify({"error": "Chỉ có thể hủy đơn ở trạng thái chờ xác nhận"}), 400
+
+    order.status = OrderStatus.CANCELED
+    db.session.commit()
+    return jsonify({"message": "Hủy đơn hàng thành công"})

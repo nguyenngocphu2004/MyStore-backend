@@ -91,7 +91,8 @@ class ProductImage(BaseModel):
 class OrderStatus(enum.Enum):
     PENDING = "PENDING"  # Chưa thanh toán
     PAID = "PAID"        # Thanh toán thành công
-    FAILED = "FAILED"    # Thanh toán thất bại
+    FAILED = "FAILED"  # Thanh toán thất bại
+    CANCELED = "CANCELED"# Hủy đơn hàng
 
 class DeliveryStatus(enum.Enum):
     PENDING = "PENDING"     # Chưa xử lý giao
@@ -114,6 +115,9 @@ class Order(BaseModel):
     items = db.relationship("OrderItem", backref="order", lazy=True)
     status = db.Column( db.Enum(OrderStatus),default=OrderStatus.PENDING,nullable=False)
     delivery_status = db.Column(db.Enum(DeliveryStatus), default=DeliveryStatus.PENDING, nullable=False)
+    payment_method = db.Column(db.String(20), nullable=True)
+    order_code = db.Column(db.String(20), unique=True, nullable=False)
+
 
 
 class OrderItem(BaseModel):

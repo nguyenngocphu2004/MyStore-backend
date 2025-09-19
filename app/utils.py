@@ -1,8 +1,12 @@
 from datetime import datetime
 from flask_mail import Message
+from flask import jsonify
 from . import mail
-
-
+import random
+import string
+from .models import Order,User,UserRole
+from functools import wraps
+from flask_jwt_extended import jwt_required, get_jwt_identity
 def time_ago(dt):
     now = datetime.now()
     diff = now - dt
@@ -53,3 +57,36 @@ Tổng cộng: {total} VND
 Cảm ơn bạn đã mua sắm tại cửa hàng chúng tôi!
 """
     mail.send(msg)
+def generate_order_code():
+    letters = ''.join(random.choices(string.ascii_uppercase, k=3))  # 3 ký tự chữ in hoa
+    numbers = ''.join(random.choices(string.digits, k=7))            # 7 chữ số
+    return letters + numbers
+
+def generate_unique_order_code():
+    while True:
+        code = generate_order_code()
+        existing = Order.query.filter_by(order_code=code).first()
+        if not existing:
+            return code
+
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        if not user or user.role != UserRole.ADMIN:
+            return jsonify({"error": "Chỉ admin mới truy cập được"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+def staff_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        if not user or user.role not in [UserRole.ADMIN, UserRole.STAFF]:
+            return jsonify({"error": "Chỉ admin hoặc nhân viên mới truy cập được"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
