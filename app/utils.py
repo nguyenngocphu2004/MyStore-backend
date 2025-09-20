@@ -46,7 +46,7 @@ def send_order_success_email(user_email, order):
     msg.body = f"""
 {greeting}
 
-Đơn hàng #{order.id} của bạn đã được thanh toán thành công!
+Đơn hàng #{order.order_code} của bạn đã được thanh toán thành công!
 
 Chi tiết đơn hàng:
 {items_detail}
