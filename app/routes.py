@@ -38,6 +38,8 @@ ZALO_CREATE_ORDER_URL = os.getenv("ZALO_CREATE_ORDER_URL")
 ZALO_NOTIFY_URL = os.getenv("ZALO_NOTIFY_URL")
 
 
+
+
 @main.route("/categories", methods=["GET"])
 def get_categories():
     categories = Category.query.all()
