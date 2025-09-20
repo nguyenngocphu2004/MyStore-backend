@@ -1678,3 +1678,35 @@ def save_extra_costs():
 
     db.session.commit()
     return jsonify({"message": f"Saved extra costs for months: {saved_months}"})
+
+@main.route('/api/admin/comments', methods=['GET'])
+@jwt_required()
+def admin_get_comments():
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user or user.role != UserRole.ADMIN:
+        return jsonify({"error": "Không có quyền truy cập"}), 403
+
+    comments = Comment.query.order_by(Comment.created_at.desc()).all()
+
+    result = []
+    for c in comments:
+        first_image = None
+        if c.product and c.product.images:  # lấy ảnh đầu tiên của product
+            first_image = c.product.images[0].url
+
+        result.append({
+            "id": c.id,
+            "product_id": c.product_id,
+            "product_name": c.product.name if c.product else None,
+            "product_image": first_image,
+            "username": c.user.username if c.user else None,
+            "guest_name": c.guest_name,
+            "content": c.content,
+            "rating": c.rating,
+            "admin_reply": c.admin_reply,
+            "created_at": c.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "likes": c.likes or 0,
+        })
+
+    return jsonify(result)
