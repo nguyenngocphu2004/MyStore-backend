@@ -1,40 +1,41 @@
-from flask import Blueprint, jsonify,make_response,request,json
+from flask import Blueprint, jsonify,make_response,request
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
                     ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost)
 from . import db,mail
 from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
-import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
+import os, requests, random,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
 from google.auth.transport import requests as google_requests
 from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required
 from datetime import datetime,timedelta
 from flask_mail import Message
 from google.oauth2 import id_token
 from werkzeug.security import generate_password_hash,check_password_hash
-
+from dotenv import load_dotenv
+load_dotenv()
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 main = Blueprint("main", __name__)
 
-GOOGLE_CLIENT_ID = "557152661913-55fa8u523grs9oqoid8sk7gc9kj3p0eg.apps.googleusercontent.com"
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
-API_KEY = "AIzaSyD-oNMq_m0nXzoapmDeWmGt553yfIOTGxQ"
-MODEL_NAME = "gemini-2.0-flash"
+API_KEY = os.getenv("GOOGLE_API_KEY")
+MODEL_NAME =  os.getenv("GOOGLE_MODEL_NAME")
 ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
 
 
-MOMO_PARTNER_CODE = "MOMO"
-MOMO_ACCESS_KEY = "F8BBA842ECF85"
-MOMO_SECRET_KEY = "K951B6PE1waDMi640xX08PD3vg6EkVlz"
-MOMO_ENDPOINT = "https://test-payment.momo.vn/v2/gateway/api/create"
-MOMO_RETURN_URL = "http://localhost:3000/payment-success"
-MOMO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
+MOMO_PARTNER_CODE = os.getenv("MOMO_PARTNER_CODE")
+MOMO_ACCESS_KEY = os.getenv("MOMO_ACCESS_KEY")
+MOMO_SECRET_KEY = os.getenv("MOMO_SECRET_KEY")
+MOMO_ENDPOINT = os.getenv("MOMO_ENDPOINT")
+MOMO_RETURN_URL = os.getenv("MOMO_RETURN_URL")
+MOMO_NOTIFY_URL = os.getenv("MOMO_NOTIFY_URL")
 
-ZALO_APP_ID = 2554
-ZALO_KEY1 = "sdngKKJmqEMzvh5QQcdD2A9XBSKUNaYn"
-ZALO_KEY2 = "trMrHtvjo6myautxDUiAcYsVtaeQ8nhf"
-ZALO_CREATE_ORDER_URL = "https://sb-openapi.zalopay.vn/v2/create"
-ZALO_NOTIFY_URL = "http://localhost:5000/api/payment_callback"
+ZALO_APP_ID = os.getenv("ZALO_APP_ID")
+ZALO_KEY1 = os.getenv("ZALO_KEY1")
+ZALO_KEY2 = os.getenv("ZALO_KEY2")
+ZALO_CREATE_ORDER_URL = os.getenv("ZALO_CREATE_ORDER_URL")
+ZALO_NOTIFY_URL = os.getenv("ZALO_NOTIFY_URL")
 
 
 @main.route("/categories", methods=["GET"])
@@ -278,7 +279,7 @@ def update_profile():
     return jsonify({"message": "Cập nhật thành công"}), 200
 
 
-@main.route('/api/buy', methods=['POST'])
+@main.route('/buy', methods=['POST'])
 @jwt_required(optional=True)
 def buy_now():
     try:
@@ -430,7 +431,7 @@ def delete_cart_item(item_id):
     db.session.commit()
     return jsonify({"message": "Xóa khỏi giỏ hàng thành công"}), 200
 
-@main.route("/api/orders/guest", methods=["POST"])
+@main.route("/orders/guest", methods=["POST"])
 def guest_orders():
     data = request.get_json()
     print("Dữ liệu nhận từ client:", data)
@@ -460,6 +461,7 @@ def guest_orders():
             "created_at": order.created_at,
             "delivery_status": order.delivery_status.value,
             "status": order.status.value,
+            "order_code": order.order_code,
             "items": [
                 {
                     "product_name": item.product.name,
@@ -1301,7 +1303,7 @@ def get_order(order_id):
         ]
     })
 
-@main.route("/api/create_order_from_cart", methods=["POST"])
+@main.route("/create_order_from_cart", methods=["POST"])
 @jwt_required()
 def create_order_from_cart():
     user_id = get_jwt_identity()
@@ -1357,7 +1359,7 @@ def create_order_from_cart():
     db.session.commit()
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
 
-@main.route("/api/chatbot", methods=["POST"])
+@main.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
     message = data.get("message", "")
@@ -1401,7 +1403,7 @@ def mask_email(email):
     return masked + "@" + parts[1]
 
 
-@main.route("/api/request-otp", methods=["POST"])
+@main.route("/request-otp", methods=["POST"])
 def request_otp():
     data = request.get_json()
     phone = data.get("phone")
@@ -1455,7 +1457,7 @@ def make_app_trans_id(order_id):
     return f"{date_str}_{order_id}_{rand_suffix}"
 
 
-@main.route("/api/verify-otp", methods=["POST"])
+@main.route("/verify-otp", methods=["POST"])
 def verify_otp():
     data = request.get_json()
     phone = data.get("phone")
@@ -1473,7 +1475,7 @@ def verify_otp():
     return jsonify({"message": "Xác thực OTP thành công"}), 200
 
 
-@main.route("/api/reset-password", methods=["POST"])
+@main.route("/reset-password", methods=["POST"])
 def reset_password():
     data = request.get_json()
     phone = data.get("phone")
@@ -1679,7 +1681,7 @@ def save_extra_costs():
     db.session.commit()
     return jsonify({"message": f"Saved extra costs for months: {saved_months}"})
 
-@main.route('/api/admin/comments', methods=['GET'])
+@main.route('/admin/comments', methods=['GET'])
 @jwt_required()
 def admin_get_comments():
     current_user_id = get_jwt_identity()
