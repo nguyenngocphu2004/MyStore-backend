@@ -174,10 +174,8 @@ class CommentVote(BaseModel):
     user = db.relationship("User", backref="votes")
     comment = db.relationship("Comment", backref="votes")
 
-class OTP(db.Model):
+class OTP(BaseModel):
     __tablename__ = "otps"
-
-    id = db.Column(db.Integer, primary_key=True)
     phone = db.Column(db.String(20), nullable=False)
     otp_code = db.Column(db.String(6), nullable=False)
     expiry = db.Column(db.DateTime, nullable=False)

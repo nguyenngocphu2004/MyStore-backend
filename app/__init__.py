@@ -44,7 +44,7 @@ def create_app():
     app.config["MAIL_USE_TLS"] = True
     app.config["MAIL_USERNAME"] = "nguyenphu1999f@gmail.com"
     app.config["MAIL_PASSWORD"] = os.getenv("MAIL_PASSWORD")
-    app.config["MAIL_DEFAULT_SENDER"] = ("FPT Shop", "your_email@gmail.com")
+    app.config["MAIL_DEFAULT_SENDER"] = ("PhuStore", "your_email@gmail.com")
     db.init_app(app)
     mail.init_app(app)
     CORS(app, supports_credentials=True)

@@ -12,6 +12,7 @@ from flask_mail import Message
 from google.oauth2 import id_token
 from werkzeug.security import generate_password_hash,check_password_hash
 from dotenv import load_dotenv
+from .socket_events import clients_rooms
 load_dotenv()
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -1745,3 +1746,8 @@ def update_admin_reply(comment_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Cập nhật trả lời thất bại.", "details": str(e)}), 500
+
+@main.route('/connected-clients')
+def get_connected_clients():
+    # Trả về danh sách các room_id (chính là request.sid) của client đang online
+    return jsonify(list(clients_rooms.values()))
