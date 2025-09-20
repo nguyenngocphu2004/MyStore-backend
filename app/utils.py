@@ -36,7 +36,7 @@ def send_order_success_email(user_email, order):
         extra_info = ""
     else:
         greeting = "Xin chào Khách hàng,"
-        extra_info = "\n\nBạn có thể tra cứu đơn hàng của mình trên website bằng mã đơn hàng."
+        extra_info = "\n\nBạn có thể tra cứu đơn hàng của mình trên website bằng số điện thoại bạn đã đặt đơn hàng."
 
     # Tạo email
     msg = Message(
@@ -54,7 +54,7 @@ Chi tiết đơn hàng:
 Tổng cộng: {total} VND
 {extra_info}
 
-Cảm ơn bạn đã mua sắm tại cửa hàng chúng tôi!
+Cảm ơn bạn đã mua sắm tại cửa hàng chúng tôi! Hân hạnh gặp lại quý khách!
 """
     mail.send(msg)
 def generate_order_code():
