@@ -189,6 +189,15 @@ class OTP(db.Model):
             and datetime.now() <= self.expiry
         )
 
+class ExtraCost(BaseModel):
+    __tablename__ = "extra_costs"
+    month = db.Column(db.String(7), nullable=False)  # YYYY-MM
+    staff = db.Column(db.Float, default=0)
+    rent = db.Column(db.Float, default=0)
+    living = db.Column(db.Float, default=0)
+    other = db.Column(db.Float, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 def seed_data(db):
     if not Category.query.first():
         phone = Category(name="Điện thoại")

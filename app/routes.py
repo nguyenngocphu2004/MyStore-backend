@@ -1,16 +1,16 @@
 from flask import Blueprint, jsonify,make_response,request,json
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
-                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus)
+                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost)
 from . import db,mail
 from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
-import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid,re
+import os, requests, random, time,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
+from google.auth.transport import requests as google_requests
 from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required
 from datetime import datetime,timedelta
 from flask_mail import Message
 from google.oauth2 import id_token
-from google.auth.transport import requests as grequests
-from werkzeug.security import generate_password_hash
+from werkzeug.security import generate_password_hash,check_password_hash
 
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -65,7 +65,6 @@ def get_brands():
 def get_products():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 8, type=int)
-
     query = (
         db.session.query(
             Product,
@@ -139,23 +138,6 @@ def register():
     password = data.get("password")
     phone = data.get("phone")
 
-    # Kiểm tra thông tin bắt buộc
-    if not username or not email or not password or not phone:
-        return jsonify({"error": "Vui lòng nhập đầy đủ thông tin"}), 400
-
-    # Kiểm tra mật khẩu tối thiểu 8 ký tự
-    if len(password) < 8:
-        return jsonify({"error": "Mật khẩu phải có ít nhất 8 ký tự"}), 400
-
-    # Kiểm tra định dạng email cơ bản
-    email_regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
-    if not re.match(email_regex, email):
-        return jsonify({"error": "Email không hợp lệ"}), 400
-
-    # Kiểm tra định dạng số điện thoại (10 số)
-    if not re.match(r'^\d{10}$', phone):
-        return jsonify({"error": "Số điện thoại phải gồm 10 chữ số"}), 400
-
     # Kiểm tra username/email/phone đã tồn tại chưa
     if User.query.filter_by(username=username).first():
         return jsonify({"error": "Tên đăng nhập đã tồn tại"}), 400
@@ -176,7 +158,6 @@ def register():
     new_user.set_password(password)
     db.session.add(new_user)
     db.session.commit()
-
     return jsonify({"message": "Đăng ký thành công"}), 201
 
 
@@ -189,7 +170,7 @@ def login():
     user = User.query.filter_by(username=username).first()
 
     if not user or not user.check_password(password):
-        return jsonify({"error": "Sai email hoặc mật khẩu"}), 401
+        return jsonify({"error": "Đăng nhập thất bại: sai tên tài khoản hoặc mật khẩu"}), 401
 
     access_token = create_access_token(identity=str(user.id))
     return jsonify({
@@ -281,11 +262,8 @@ def update_profile():
         return jsonify({"error": "User không tồn tại"}), 404
 
     data = request.get_json()
-    username = data.get("username")
     email = data.get("email")
     phone = data.get("phone")
-    if username:
-        user.username = username
     if email:
         # Kiểm tra email tồn tại chưa
         if User.query.filter(User.email == email, User.id != user_id).first():
@@ -1059,21 +1037,7 @@ def admin_dashboard():
 @main.route("/admin/profit")
 @jwt_required()
 def admin_profit():
-    # Tổng doanh thu, chi phí, lợi nhuận (chỉ đơn đã thanh toán)
-    totals = db.session.query(
-        func.sum(OrderItem.unit_price * OrderItem.quantity),
-        func.sum(Product.cost_price * OrderItem.quantity),
-        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
-    ).join(Product, Product.id == OrderItem.product_id)\
-     .join(Order, Order.id == OrderItem.order_id)\
-     .filter(Order.status == 'PAID')\
-     .one()
-
-    total_revenue = float(totals[0] or 0)
-    total_cost = float(totals[1] or 0)
-    total_profit = float(totals[2] or 0)
-
-    # Theo tháng (đã sửa lấy năm-tháng đầy đủ)
+    # Lấy doanh thu, chi phí, lợi nhuận gốc
     profit_by_month = db.session.query(
         func.date_format(Order.created_at, "%Y-%m"),
         func.sum(OrderItem.unit_price * OrderItem.quantity),
@@ -1084,14 +1048,25 @@ def admin_profit():
      .filter(Order.status == 'PAID')\
      .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
 
-    return jsonify({
-        "totals": {
-            "revenue": total_revenue,
-            "cost": total_cost,
-            "profit": total_profit
-        },
-        "profit_by_month": [[str(m), float(r or 0), float(c or 0), float(p or 0)] for m, r, c, p in profit_by_month],
-    })
+    # Lấy chi phí bổ sung từ DB
+    result = []
+    for m, r, c, p in profit_by_month:
+        extra = ExtraCost.query.filter_by(month=str(m)).first()
+        staff = extra.staff if extra else 0
+        rent = extra.rent if extra else 0
+        living = extra.living if extra else 0
+        other = extra.other if extra else 0
+        total_extra = staff + rent + living + other
+        total_cost = c + total_extra
+        profit_new = r - total_cost
+
+        result.append([
+            str(m), float(r or 0), float(c or 0), float(p or 0),
+            float(staff), float(rent), float(living), float(other),
+            float(total_cost), float(profit_new)
+        ])
+
+    return jsonify({"profit_by_month": result})
 
 @main.route("/admin/categories", methods=["POST"])
 @jwt_required()
@@ -1523,82 +1498,6 @@ def reset_password():
     return jsonify({"message": "Đổi mật khẩu thành công"}), 200
 
 
-@main.route("/api/create_zalopay_payment/<int:order_id>", methods=["POST"])
-def create_zalopay_payment(order_id):
-    order = Order.query.get_or_404(order_id)
-    order.payment_method = "ZALOPAY"
-    db.session.commit()
-    if order.status != OrderStatus.PENDING:
-        return jsonify({"error": "Đơn hàng đã được thanh toán hoặc hủy"}), 400
-
-    app_id = ZALO_APP_ID
-    amount = int(order.total_price)
-    app_user = order.user.email if order.user else order.guest_email or "guest"
-    app_time = int(time.time() * 1000)
-    app_trans_id = make_app_trans_id(order.id)
-
-    # URL redirect sau thanh toán (ZP redirect về đây)
-    redirect_url = "http://localhost:3000/payment-success"  # client-side
-    callback_url = "http://localhost:5000/api/update_order_status_callback"  # API mới bạn tạo để xử lý cập nhật
-
-    # embed_data & item (JSON string)
-    embed_data = json.dumps({
-        "redirecturl": redirect_url
-    }, ensure_ascii=False)
-
-    item = json.dumps([
-        {
-            "itemid": f"order_{order.id}",
-            "itemname": "Đơn hàng",
-            "itemprice": amount,
-            "itemquantity": 1
-        }
-    ], ensure_ascii=False)
-
-    description = f"Thanh toán đơn hàng #{order.id}"
-
-    # Tính MAC theo định dạng yêu cầu
-    mac_data = f"{app_id}|{app_trans_id}|{app_user}|{amount}|{app_time}|{embed_data}|{item}"
-    mac = hmac.new(ZALO_KEY1.encode("utf-8"), mac_data.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    # Payload gửi đến ZaloPay
-    payload = {
-        "app_id": app_id,
-        "app_user": app_user,
-        "app_time": app_time,
-        "amount": amount,
-        "app_trans_id": app_trans_id,
-        "embed_data": embed_data,
-        "item": item,
-        "description": description,
-        "bank_code": "",
-        "callback_url": callback_url,
-        "mac": mac
-    }
-
-    try:
-        response = requests.post(ZALO_CREATE_ORDER_URL, json=payload, timeout=30)
-        result = response.json()
-        print("ZaloPay response:", result)
-    except Exception as e:
-        print("ZaloPay request error:", e)
-        return jsonify({"error": "Lỗi kết nối ZaloPay"}), 500
-
-    if result.get("return_code") == 1:
-        order.zalopay_app_trans_id = app_trans_id
-        order.zalopay_zp_trans_token = result.get("zp_trans_token")
-        db.session.commit()
-
-        return jsonify({
-            "payUrl": result["order_url"]  # frontend sẽ redirect
-        })
-
-    return jsonify({
-        "error": "Tạo đơn ZaloPay thất bại",
-        "detail": result
-    }), 400
-
-
 @main.route("/google-login", methods=["POST"])
 def google_login():
     data = request.get_json()
@@ -1607,7 +1506,13 @@ def google_login():
         return jsonify({"error": "Thiếu id_token"}), 400
 
     try:
-        idinfo = id_token.verify_oauth2_token(id_token_received, grequests.Request(), GOOGLE_CLIENT_ID)
+        # Dùng Request() của google.auth.transport
+        idinfo = id_token.verify_oauth2_token(
+            id_token_received,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+
         email = idinfo.get("email")
         sub = idinfo.get("sub")
 
@@ -1622,7 +1527,7 @@ def google_login():
             db.session.add(user)
             db.session.commit()
 
-        access_token = create_access_token(identity=user.id)
+        access_token = create_access_token(identity=str(user.id))
 
         return jsonify({
             "access_token": access_token,
@@ -1721,3 +1626,55 @@ def cancel_order(order_id):
     order.status = OrderStatus.CANCELED
     db.session.commit()
     return jsonify({"message": "Hủy đơn hàng thành công"})
+
+@main.route("/change-password", methods=["POST"])
+@jwt_required()
+def change_password():
+    data = request.get_json()
+    old_password = data.get("old_password")
+    new_password = data.get("new_password")
+
+    if not old_password or not new_password:
+        return jsonify({"error": "Thiếu dữ liệu"}), 400
+
+    if len(new_password) < 8:
+        return jsonify({"error": "Mật khẩu mới phải có ít nhất 8 ký tự"}), 400
+
+    # Lấy user hiện tại từ JWT
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "Người dùng không tồn tại"}), 404
+
+    # Kiểm tra mật khẩu cũ
+    if not check_password_hash(user.password_hash, old_password):
+        return jsonify({"error": "Mật khẩu cũ không đúng"}), 400
+
+    # Cập nhật mật khẩu mới
+    user.password_hash = generate_password_hash(new_password)
+    db.session.commit()
+
+    return jsonify({"message": "Đổi mật khẩu thành công"}), 200
+
+
+@main.route("/admin/extra_costs", methods=["POST"])
+@jwt_required()
+def save_extra_costs():
+    data = request.json  # { month: { staff, rent, living, other } }
+    saved_months = []
+
+    for month, costs in data.items():
+        extra = ExtraCost.query.filter_by(month=month).first()
+        if not extra:
+            extra = ExtraCost(month=month)
+            db.session.add(extra)
+
+        extra.staff = float(costs.get("staff", 0))
+        extra.rent = float(costs.get("rent", 0))
+        extra.living = float(costs.get("living", 0))
+        extra.other = float(costs.get("other", 0))
+        saved_months.append(month)
+
+    db.session.commit()
+    return jsonify({"message": f"Saved extra costs for months: {saved_months}"})
