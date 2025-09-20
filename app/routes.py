@@ -6,7 +6,7 @@ from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
 import os, requests, random,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
 from google.auth.transport import requests as google_requests
-from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required
+from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required,send_order_delivered_email
 from datetime import datetime,timedelta
 from flask_mail import Message
 from google.oauth2 import id_token
@@ -1273,9 +1273,9 @@ def payment_callback_confirm(order_id):
                         product.stock = 0  # tránh stock âm
             db.session.commit()
             if order.user and order.user.email:
-                send_order_success_email(order.user.email, order)
+                send_order_success_email(order.user.email, order, is_cod=False)
             elif order.guest_email:
-                send_order_success_email(order.guest_email, order)
+                send_order_success_email(order.guest_email, order, is_cod=False)
         else:
             # Thanh toán thất bại
             order.status = OrderStatus.FAILED
@@ -1559,6 +1559,10 @@ def pay_cod(order_id):
 
     try:
         db.session.commit()
+        if order.user and order.user.email:
+            send_order_success_email(order.user.email, order, is_cod=True)
+        elif order.guest_email:
+            send_order_success_email(order.guest_email, order,is_cod=True)
         return jsonify({"message": "Thanh toán COD thành công. Đơn hàng đang được xử lý."}), 200
     except Exception as e:
         db.session.rollback()
@@ -1608,7 +1612,7 @@ def user_confirm_received(order_id):
         if product.stock < item.quantity:
             return jsonify({"error": f"Sản phẩm '{product.name}' không đủ hàng tồn kho"}), 400
         product.stock -= item.quantity
-
+    send_order_delivered_email(order.user.email, order)
     order.delivery_status = DeliveryStatus.DELIVERED
     db.session.commit()
 
@@ -1714,3 +1718,30 @@ def admin_get_comments():
         })
 
     return jsonify(result)
+
+@main.route("/admin/comments/<int:comment_id>", methods=["DELETE"])
+@staff_required
+def delete_comment(comment_id):
+    comment = Comment.query.get_or_404(comment_id)
+    try:
+        db.session.delete(comment)
+        db.session.commit()
+        return jsonify({"message": f"Bình luận {comment_id} đã được xóa thành công."}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Xóa bình luận thất bại.", "details": str(e)}), 500
+
+@main.route("/admin/comments/<int:comment_id>/reply", methods=["PUT"])
+@staff_required
+def update_admin_reply(comment_id):
+    data = request.json
+    admin_reply = data.get("admin_reply", "").strip()
+
+    comment = Comment.query.get_or_404(comment_id)
+    try:
+        comment.admin_reply = admin_reply
+        db.session.commit()
+        return jsonify({"message": "Cập nhật trả lời thành công."}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Cập nhật trả lời thất bại.", "details": str(e)}), 500

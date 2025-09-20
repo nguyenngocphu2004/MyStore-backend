@@ -23,7 +23,7 @@ def time_ago(dt):
     else:
         return dt.strftime("%Y-%m-%d")
 
-def send_order_success_email(user_email, order):
+def send_order_success_email(user_email, order, is_cod=False):
     # Chuẩn bị chi tiết các sản phẩm
     items_detail = "\n".join(
         [f"- {item.product.name} x {item.quantity} = {item.unit_price * item.quantity} VND" for item in order.items]
@@ -38,15 +38,24 @@ def send_order_success_email(user_email, order):
         greeting = "Xin chào Khách hàng,"
         extra_info = "\n\nBạn có thể tra cứu đơn hàng của mình trên website bằng số điện thoại bạn đã đặt đơn hàng."
 
+    # Nội dung email tùy theo is_cod
+    if is_cod:
+        payment_info = "Phương thức thanh toán: Thanh toán khi nhận hàng (COD). Bạn sẽ thanh toán khi nhận đơn hàng."
+        subject = "Xác nhận đơn hàng đã được ghi nhận"
+    else:
+        payment_info = "Đơn hàng của bạn đã được thanh toán thành công!"
+        subject = "Xác nhận thanh toán đơn hàng thành công"
+
     # Tạo email
     msg = Message(
-        subject="Xác nhận đơn hàng thành công",
+        subject=subject,
         recipients=[user_email]
     )
     msg.body = f"""
 {greeting}
 
-Đơn hàng #{order.order_code} của bạn đã được thanh toán thành công!
+Đơn hàng #{order.order_code} của bạn đã được ghi nhận.
+{payment_info}
 
 Chi tiết đơn hàng:
 {items_detail}
@@ -54,9 +63,48 @@ Chi tiết đơn hàng:
 Tổng cộng: {total} VND
 {extra_info}
 
-Cảm ơn bạn đã mua sắm tại cửa hàng chúng tôi! Hân hạnh gặp lại quý khách!
+Cảm ơn bạn đã mua sắm tại cửa hàng chúng tôi!
 """
     mail.send(msg)
+
+
+def send_order_delivered_email(user_email, order):
+    # Chuẩn bị chi tiết các sản phẩm
+    items_detail = "\n".join(
+        [f"- {item.product.name} x {item.quantity} = {item.unit_price * item.quantity} VND" for item in order.items]
+    )
+    total = order.total_price
+
+    # Kiểm tra user hay guest
+    if order.user:
+        greeting = f"Xin chào {order.user.username},"
+        extra_info = ""
+    else:
+        greeting = "Xin chào Khách hàng,"
+        extra_info = "\n\nBạn có thể liên hệ với chúng tôi nếu có thắc mắc về đơn hàng."
+
+    # Tạo email
+    msg = Message(
+        subject="Xác nhận đơn hàng đã được giao",
+        recipients=[user_email]
+    )
+    msg.body = f"""
+{greeting}
+
+Đơn hàng #{order.order_code} của bạn đã được giao đến bạn thành công!
+
+Chi tiết đơn hàng:
+{items_detail}
+
+Tổng cộng: {total} VND
+
+Chúng tôi rất vui vì bạn đã nhận được hàng. Cảm ơn bạn đã tin tưởng và mua sắm tại cửa hàng chúng tôi!
+{extra_info}
+"""
+    mail.send(msg)
+
+
+
 def generate_order_code():
     letters = ''.join(random.choices(string.ascii_uppercase, k=3))  # 3 ký tự chữ in hoa
     numbers = ''.join(random.choices(string.digits, k=7))            # 7 chữ số
