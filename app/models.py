@@ -87,6 +87,21 @@ class ProductImage(BaseModel):
     url = db.Column(db.String(255), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
 
+class StockIn(BaseModel):
+    __tablename__ = "stock_in"
+
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    date = db.Column(db.Date, nullable=False, default=datetime.now)
+    product = db.relationship("Product", backref="stock_entries")
+
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user = db.relationship("User", backref="stock_entries")
+
+    def __str__(self):
+        return f"{self.user.username} nhập {self.quantity} {self.product.name} ngày {self.date.strftime('%d/%m/%Y')}"
+
 
 class OrderStatus(enum.Enum):
     PENDING = "PENDING"  # Chưa thanh toán

@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify,make_response,request
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
-                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost)
+                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn)
 from . import db,mail
 from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
@@ -797,8 +797,8 @@ def create_product():
             name=data.get("name"),
             price=float(data.get("price")),
             cost_price=float(data.get("cost_price")),
-            stock=float(data.get("stock")),
-            brand=data.get("brand"),
+            stock=int(data.get("stock")),
+            brand_id=int(data.get("brand_id")),
             category_id=int(data.get("category_id")),
             cpu=data.get("cpu"),
             ram=data.get("ram"),
@@ -1668,7 +1668,7 @@ def change_password():
 
 
 @main.route("/admin/extra_costs", methods=["POST"])
-@jwt_required()
+@staff_required
 def save_extra_costs():
     data = request.json  # { month: { staff, rent, living, other } }
     saved_months = []
@@ -1689,13 +1689,8 @@ def save_extra_costs():
     return jsonify({"message": f"Saved extra costs for months: {saved_months}"})
 
 @main.route('/admin/comments', methods=['GET'])
-@jwt_required()
+@staff_required
 def admin_get_comments():
-    current_user_id = get_jwt_identity()
-    user = User.query.get(current_user_id)
-    if not user or user.role != UserRole.ADMIN:
-        return jsonify({"error": "Không có quyền truy cập"}), 403
-
     comments = Comment.query.order_by(Comment.created_at.desc()).all()
 
     result = []
@@ -1751,3 +1746,133 @@ def update_admin_reply(comment_id):
 def get_connected_clients():
     # Trả về danh sách các room_id (chính là request.sid) của client đang online
     return jsonify(list(clients_rooms.values()))
+
+@main.route("/admin/stockin", methods=["POST"])
+@staff_required
+def stock_in():
+    data = request.json
+    product_id = data.get("product_id")
+    quantity = int(data.get("quantity", 0))
+    price = float(data.get("price", 0))
+    date = data.get("date")
+    user_id = get_jwt_identity()
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({"error": "Sản phẩm không tồn tại"}), 404
+
+    # Cập nhật tồn kho
+    old_value = product.stock * product.cost_price
+    new_value = quantity * price
+
+    product.stock += quantity
+    if product.stock > 0:
+        product.cost_price = (old_value + new_value) / product.stock
+
+    # Ghi lịch sử nhập kho
+    entry = StockIn(
+        product_id=product.id,
+        quantity=quantity,
+        price=price,
+        date = datetime.now(),
+        user_id=user_id,
+    )
+    db.session.add(entry)
+    db.session.commit()
+
+    return jsonify({"message": "Nhập kho thành công"}), 201
+
+
+@main.route("/admin/stockin", methods=["GET"])
+@staff_required
+def stock_in_history():
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 10, type=int)
+
+    pagination = StockIn.query.order_by(StockIn.date.desc()).paginate(page=page, per_page=per_page)
+    entries = pagination.items
+
+    result = []
+    for e in entries:
+        result.append({
+            "id": e.id,
+            "product_name": e.product.name if e.product else "N/A",
+            "quantity": e.quantity,
+            "price": e.price,
+            "date": e.date.strftime("%Y-%m-%d"),
+            "imported_by": e.user.username if e.user else "Unknown"
+        })
+
+    return jsonify({
+        "entries": result,
+        "total": pagination.total,
+        "page": pagination.page,
+        "per_page": pagination.per_page,
+        "pages": pagination.pages
+    })
+
+@main.route("/admin/products", methods=["GET"])
+def get_productss():
+    try:
+        products = Product.query.all()
+        result = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "price": p.price,
+                "stock": p.stock
+            }
+            for p in products
+        ]
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@main.route("/admin/stockin/<int:entry_id>", methods=["DELETE"])
+@staff_required
+def delete_stock_in(entry_id):
+    entry = StockIn.query.get(entry_id)
+    if not entry:
+        return jsonify({"error": "Bản ghi không tồn tại"}), 404
+
+    try:
+        db.session.delete(entry)
+        db.session.commit()
+        return jsonify({"message": "Xóa nhập kho thành công"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Xóa thất bại"}), 500
+
+@main.route("/admin/stockin/<int:id>", methods=["PUT"])
+@staff_required
+def update_stockin(id):
+    data = request.json
+    entry = StockIn.query.get(id)
+    if not entry:
+        return jsonify({"error": "Bản ghi không tồn tại"}), 404
+
+    # Lấy sản phẩm liên quan
+    product = Product.query.get(entry.product_id)
+    if not product:
+        return jsonify({"error": "Sản phẩm không tồn tại"}), 404
+
+    # Cập nhật tồn kho: trừ đi số lượng cũ, cộng số lượng mới
+    old_quantity = entry.quantity
+    old_price_total = entry.quantity * entry.price
+
+    new_quantity = int(data.get("quantity", entry.quantity))
+    new_price = float(data.get("price", entry.price))
+    new_price_total = new_quantity * new_price
+
+    # Điều chỉnh tồn kho
+    product.stock = product.stock - old_quantity + new_quantity
+
+    # Cập nhật giá gốc nếu cần
+    if product.stock > 0:
+        product.cost_price = (product.cost_price * (product.stock - new_quantity + old_quantity) - old_price_total + new_price_total) / product.stock
+
+    # Cập nhật entry
+    entry.quantity = new_quantity
+    entry.price = new_price
+
+    db.session.commit()
+    return jsonify({"message": "Cập nhật nhập kho thành công"})
