@@ -103,6 +103,21 @@ class StockIn(BaseModel):
         return f"{self.user.username} nhập {self.quantity} {self.product.name} ngày {self.date.strftime('%d/%m/%Y')}"
 
 
+class StockInLog(BaseModel):
+    __tablename__ = "stockin_logs"
+
+    stockin_id = db.Column(db.Integer, db.ForeignKey("stock_in.id"), nullable=False)
+    old_quantity = db.Column(db.Integer)
+    new_quantity = db.Column(db.Integer)
+    old_price = db.Column(db.Float)
+    new_price = db.Column(db.Float)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+    user = db.relationship("User", backref="stockin_logs")
+    def __repr__(self):
+        return f"<StockInLog {self.action} by {self.user_id} at {self.created_at}>"
+
 class OrderStatus(enum.Enum):
     PENDING = "PENDING"  # Chưa thanh toán
     PAID = "PAID"        # Thanh toán thành công

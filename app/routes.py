@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify,make_response,request
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
-                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn)
+                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn,StockInLog)
 from . import db,mail
 from sqlalchemy import case,func
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
@@ -13,6 +13,7 @@ from google.oauth2 import id_token
 from werkzeug.security import generate_password_hash,check_password_hash
 from dotenv import load_dotenv
 from .socket_events import clients_rooms
+from math import ceil
 load_dotenv()
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -69,13 +70,17 @@ def get_brands():
 def get_products():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 8, type=int)
+    search = request.args.get("search", "", type=str).strip()
+    category = request.args.get("category", "", type=str).strip()
+    brand = request.args.get("brand", "", type=str).strip()
+
     query = (
         db.session.query(
             Product,
             func.coalesce(
                 func.sum(
                     case(
-                        (Order.status == OrderStatus.PAID, OrderItem.quantity),  # chỉ cộng nếu đơn đã thanh toán
+                        (Order.status == OrderStatus.PAID, OrderItem.quantity),
                         else_=0
                     )
                 ),
@@ -87,7 +92,20 @@ def get_products():
         .group_by(Product.id)
     )
 
+    # --- Lọc theo search ---
+    if search:
+        query = query.filter(Product.name.ilike(f"%{search}%"))
+
+    # --- Lọc theo category ---
+    if category:
+        query = query.join(Category).filter(Category.name == category)
+
+    # --- Lọc theo brand ---
+    if brand:
+        query = query.join(Brand).filter(Brand.name == brand)
+
     total = query.count()
+
     products = (
         query.order_by(func.rand())
         .offset((page - 1) * per_page)
@@ -715,16 +733,38 @@ def admin_login():
 @main.route("/admin/users", methods=["GET"])
 @staff_required
 def get_users():
-    users = User.query.all()
-    result = []
-    for u in users:
-        result.append({
+    # Lấy page và per_page từ query string (vd: /admin/users?page=2&per_page=10)
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 10, type=int)
+    search = request.args.get("search", "").strip()
+    role = request.args.get("role", "").strip()
+    query = User.query
+    if search:
+        query = query.filter(
+            (User.username.ilike(f"%{search}%")) |
+            (User.email.ilike(f"%{search}%"))
+        )
+    if role:
+        query = query.filter(User.role == role)
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
+    users = []
+    for u in pagination.items:
+        users.append({
             "id": u.id,
             "username": u.username,
             "email": u.email,
             "role": u.role.value
         })
-    return jsonify(result)
+
+    return jsonify({
+        "users": users,
+        "total": pagination.total,        # tổng số user
+        "pages": pagination.pages,        # tổng số trang
+        "current_page": pagination.page,  # trang hiện tại
+        "per_page": pagination.per_page   # số lượng user mỗi trang
+    })
+
 
 @main.route("/admin/users", methods=["POST"])
 @admin_required
@@ -966,50 +1006,75 @@ def delete_product(product_id):
     return jsonify({"message": "Product deleted successfully"})
 
 @main.route('/admin/dashboard')
+@staff_required
 def admin_dashboard():
-    # Tổng doanh thu chỉ tính các đơn đã thanh toán
-    total_revenue = db.session.query(func.sum(Order.total_price))\
-        .filter(Order.status == 'PAID').scalar() or 0
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 3))
+    month = request.args.get("month")  # format: "YYYY-MM"
 
-    # Tổng số đơn hàng đã thanh toán
-    total_orders = db.session.query(func.count(Order.id))\
-        .filter(Order.status == 'PAID').scalar() or 0
+    # ========================
+    # Tổng doanh thu & đơn hàng
+    # ========================
+    total_query = Order.query.filter(Order.status == 'PAID')
+    if month:
+        year, month_num = map(int, month.split("-"))
+        total_query = total_query.filter(
+            func.extract('year', Order.created_at) == year,
+            func.extract('month', Order.created_at) == month_num
+        )
 
-    # Doanh thu theo tháng (chỉ đơn đã thanh toán)
-    revenue_by_month = db.session.query(
-        func.date_format(Order.created_at, "%Y-%m"),
-        func.sum(Order.total_price)
-    ).filter(Order.status == 'PAID') \
-     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
-    revenue_by_month = [[r[0], float(r[1])] for r in revenue_by_month]
+    total_revenue = total_query.with_entities(func.sum(Order.total_price)).scalar() or 0
+    total_orders = total_query.with_entities(func.count(Order.id)).scalar() or 0
 
-    # Số lượng đơn hàng theo tháng (chỉ đơn đã thanh toán)
-    orders_by_month = db.session.query(
-        func.date_format(Order.created_at, "%Y-%m"),
-        func.count(Order.id)
-    ).filter(Order.status == 'PAID') \
-     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
-    orders_by_month = [[r[0], r[1]] for r in orders_by_month]
+    # ========================
+    # Doanh thu & đơn hàng theo tháng
+    # ========================
+    if month:
+        # Chỉ 1 tháng -> không phân trang
+        revenue_by_month = [[month, float(total_revenue)]]
+        orders_by_month = [[month, total_orders]]
+        total_months = 1
+    else:
+        # Query tất cả các tháng đã có đơn -> phân trang
+        query_revenue = db.session.query(
+            func.date_format(Order.created_at, "%Y-%m"),
+            func.sum(Order.total_price)
+        ).filter(Order.status == 'PAID') \
+         .group_by(func.date_format(Order.created_at, "%Y-%m")) \
+         .order_by(func.date_format(Order.created_at, "%Y-%m").desc())
 
-    # Số lượng sản phẩm theo brand và category thì không cần filter vì đó là sản phẩm
+        total_months = query_revenue.count()
+        revenue_by_month = query_revenue.limit(per_page).offset((page - 1) * per_page).all()
+        revenue_by_month = [[r[0], float(r[1])] for r in revenue_by_month]
+
+        query_orders = db.session.query(
+            func.date_format(Order.created_at, "%Y-%m"),
+            func.count(Order.id)
+        ).filter(Order.status == 'PAID') \
+         .group_by(func.date_format(Order.created_at, "%Y-%m")) \
+         .order_by(func.date_format(Order.created_at, "%Y-%m").desc())
+        orders_by_month = query_orders.limit(per_page).offset((page - 1) * per_page).all()
+        orders_by_month = [[r[0], r[1]] for r in orders_by_month]
+
+    # ========================
+    # Sản phẩm theo brand
+    # ========================
     products_by_brand = db.session.query(
-        Brand.name,
-        func.count(Product.id)
+        Brand.name, func.count(Product.id)
     ).join(Product, Brand.id == Product.brand_id) \
      .group_by(Brand.name).all()
     products_by_brand = [[r[0], r[1]] for r in products_by_brand]
 
+    # Sản phẩm theo category
     products_by_category = db.session.query(
-        Category.name,
-        func.count(Product.id)
+        Category.name, func.count(Product.id)
     ).join(Product, Category.id == Product.category_id) \
      .group_by(Category.name).all()
     products_by_category = [[r[0], r[1]] for r in products_by_category]
 
-    # Doanh thu theo brand (chỉ đơn đã thanh toán)
+    # Doanh thu theo brand
     revenue_by_brand = db.session.query(
-        Brand.name,
-        func.sum(OrderItem.quantity * OrderItem.unit_price)
+        Brand.name, func.sum(OrderItem.quantity * OrderItem.unit_price)
     ).join(Product, Brand.id == Product.brand_id) \
      .join(OrderItem, Product.id == OrderItem.product_id) \
      .join(Order, Order.id == OrderItem.order_id) \
@@ -1017,10 +1082,9 @@ def admin_dashboard():
      .group_by(Brand.name).all()
     revenue_by_brand = [[r[0], float(r[1])] for r in revenue_by_brand]
 
-    # Doanh thu theo category (chỉ đơn đã thanh toán)
+    # Doanh thu theo category
     revenue_by_category = db.session.query(
-        Category.name,
-        func.sum(OrderItem.quantity * OrderItem.unit_price)
+        Category.name, func.sum(OrderItem.quantity * OrderItem.unit_price)
     ).join(Product, Category.id == Product.category_id) \
      .join(OrderItem, Product.id == OrderItem.product_id) \
      .join(Order, Order.id == OrderItem.order_id) \
@@ -1028,6 +1092,9 @@ def admin_dashboard():
      .group_by(Category.name).all()
     revenue_by_category = [[r[0], float(r[1])] for r in revenue_by_category]
 
+    # ========================
+    # Trả dữ liệu JSON
+    # ========================
     return jsonify({
         "total_revenue": float(total_revenue),
         "total_orders": total_orders,
@@ -1036,24 +1103,56 @@ def admin_dashboard():
         "products_by_brand": products_by_brand,
         "products_by_category": products_by_category,
         "revenue_by_brand": revenue_by_brand,
-        "revenue_by_category": revenue_by_category
+        "revenue_by_category": revenue_by_category,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total_months": total_months,
+            "total_pages": (total_months + per_page - 1) // per_page
+        }
     })
+
 
 @main.route("/admin/profit")
 @jwt_required()
 def admin_profit():
-    # Lấy doanh thu, chi phí, lợi nhuận gốc
-    profit_by_month = db.session.query(
+    """
+    API lấy dữ liệu lợi nhuận theo tháng, hỗ trợ:
+    - tìm kiếm theo tháng (month=YYYY-MM)
+    - phân trang (page, per_page)
+    """
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 5))
+    month_filter = request.args.get("month")  # YYYY-MM
+
+    # Truy vấn cơ bản: doanh thu, chi phí, lợi nhuận gốc
+    query = db.session.query(
         func.date_format(Order.created_at, "%Y-%m"),
         func.sum(OrderItem.unit_price * OrderItem.quantity),
         func.sum(Product.cost_price * OrderItem.quantity),
-        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity),
-    ).join(OrderItem, Order.id == OrderItem.order_id)\
-     .join(Product, Product.id == OrderItem.product_id)\
-     .filter(Order.status == 'PAID')\
-     .group_by(func.date_format(Order.created_at, "%Y-%m")).all()
+        func.sum((OrderItem.unit_price - Product.cost_price) * OrderItem.quantity)
+    ).join(OrderItem, Order.id == OrderItem.order_id) \
+     .join(Product, Product.id == OrderItem.product_id) \
+     .filter(Order.status == 'PAID')
 
-    # Lấy chi phí bổ sung từ DB
+    if month_filter:
+        year, month = month_filter.split("-")
+        query = query.filter(
+            func.extract("year", Order.created_at) == int(year),
+            func.extract("month", Order.created_at) == int(month)
+        )
+
+    query = query.group_by(func.date_format(Order.created_at, "%Y-%m")) \
+                 .order_by(func.date_format(Order.created_at, "%Y-%m").desc())
+
+    # Tính tổng số tháng để phân trang
+    total_months = query.count()
+    total_pages = (total_months + per_page - 1) // per_page
+
+    # Phân trang
+    profit_by_month = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    # Lấy chi phí bổ sung từ ExtraCost
     result = []
     for m, r, c, p in profit_by_month:
         extra = ExtraCost.query.filter_by(month=str(m)).first()
@@ -1071,7 +1170,15 @@ def admin_profit():
             float(total_cost), float(profit_new)
         ])
 
-    return jsonify({"profit_by_month": result})
+    return jsonify({
+        "profit_by_month": result,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total_months": total_months,
+            "total_pages": total_pages
+        }
+    })
 
 @main.route("/admin/categories", methods=["POST"])
 @jwt_required()
@@ -1751,35 +1858,41 @@ def get_connected_clients():
 @staff_required
 def stock_in():
     data = request.json
-    product_id = data.get("product_id")
-    quantity = int(data.get("quantity", 0))
-    price = float(data.get("price", 0))
-    date = data.get("date")
+    items = data.get("items", [])   # danh sách sản phẩm nhập
     user_id = get_jwt_identity()
-    product = Product.query.get(product_id)
-    if not product:
-        return jsonify({"error": "Sản phẩm không tồn tại"}), 404
 
-    # Cập nhật tồn kho
-    old_value = product.stock * product.cost_price
-    new_value = quantity * price
+    if not items:
+        return jsonify({"error": "Chưa có sản phẩm nào để nhập"}), 400
 
-    product.stock += quantity
-    if product.stock > 0:
-        product.cost_price = (old_value + new_value) / product.stock
+    for item in items:
+        product_id = item.get("product_id")
+        quantity = int(item.get("quantity", 0))
+        price = float(item.get("price", 0))
 
-    # Ghi lịch sử nhập kho
-    entry = StockIn(
-        product_id=product.id,
-        quantity=quantity,
-        price=price,
-        date = datetime.now(),
-        user_id=user_id,
-    )
-    db.session.add(entry)
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({"error": f"Sản phẩm ID {product_id} không tồn tại"}), 404
+
+        # Cập nhật tồn kho và giá vốn
+        old_value = product.stock * product.cost_price
+        new_value = quantity * price
+
+        product.stock += quantity
+        if product.stock > 0:
+            product.cost_price = (old_value + new_value) / product.stock
+
+        # Ghi lịch sử nhập kho
+        entry = StockIn(
+            product_id=product.id,
+            quantity=quantity,
+            price=price,
+            date=datetime.now(),
+            user_id=user_id,
+        )
+        db.session.add(entry)
+
     db.session.commit()
-
-    return jsonify({"message": "Nhập kho thành công"}), 201
+    return jsonify({"message": "Nhập sản phẩm thành công"}), 201
 
 
 @main.route("/admin/stockin", methods=["GET"])
@@ -1787,8 +1900,20 @@ def stock_in():
 def stock_in_history():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
+    search = request.args.get("search", "", type=str)
+    product_id = request.args.get("product_id", type=int)
+    imported_by = request.args.get("imported_by", "", type=str)
+    query = StockIn.query.join(Product).join(User)
 
-    pagination = StockIn.query.order_by(StockIn.date.desc()).paginate(page=page, per_page=per_page)
+    if search:
+        query = query.filter(Product.name.ilike(f"%{search}%") | User.username.ilike(f"%{search}%"))
+
+    if product_id:
+        query = query.filter(StockIn.product_id == product_id)
+
+    if imported_by:
+        query = query.filter(User.username.ilike(f"%{imported_by}%"))
+    pagination = query.order_by(StockIn.date.desc()).paginate(page=page, per_page=per_page, error_out=False)
     entries = pagination.items
 
     result = []
@@ -1847,6 +1972,7 @@ def delete_stock_in(entry_id):
 def update_stockin(id):
     data = request.json
     entry = StockIn.query.get(id)
+    user_id = get_jwt_identity()
     if not entry:
         return jsonify({"error": "Bản ghi không tồn tại"}), 404
 
@@ -1857,6 +1983,7 @@ def update_stockin(id):
 
     # Cập nhật tồn kho: trừ đi số lượng cũ, cộng số lượng mới
     old_quantity = entry.quantity
+    old_price = entry.price
     old_price_total = entry.quantity * entry.price
 
     new_quantity = int(data.get("quantity", entry.quantity))
@@ -1873,6 +2000,31 @@ def update_stockin(id):
     # Cập nhật entry
     entry.quantity = new_quantity
     entry.price = new_price
-
+    entry.updated_by = user_id
+    log = StockInLog(
+        stockin_id=entry.id,
+        old_quantity=old_quantity,
+        new_quantity=new_quantity,
+        old_price=old_price,
+        new_price=new_price,
+        user_id=user_id
+    )
+    db.session.add(log)
     db.session.commit()
     return jsonify({"message": "Cập nhật nhập kho thành công"})
+
+@main.route("/admin/stockin/<int:id>/logs", methods=["GET"])
+@staff_required
+def get_stockin_logs(id):
+    logs = StockInLog.query.filter_by(stockin_id=id).order_by(StockInLog.created_at.desc()).all()
+    return jsonify([
+        {
+            "old_quantity": log.old_quantity,
+            "new_quantity": log.new_quantity,
+            "old_price": log.old_price,
+            "new_price": log.new_price,
+            "username": log.user.username if log.user else None,
+            "created_at": log.created_at.isoformat()
+        }
+        for log in logs
+    ])
