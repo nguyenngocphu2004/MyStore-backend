@@ -2,7 +2,8 @@ from flask import Blueprint, jsonify,make_response,request
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
                     ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn,StockInLog)
 from . import db,mail
-from sqlalchemy import case,func
+from sqlalchemy.orm import contains_eager
+from sqlalchemy import case,func,or_
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
 import os, requests, random,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
 from google.auth.transport import requests as google_requests
@@ -53,9 +54,8 @@ def get_categories():
     ]
     return jsonify(result)
 
-
-@main.route("/brands", methods=["GET"])
-def get_brands():
+@main.route("/brandss", methods=["GET"])
+def get_brandss():
     brands = Brand.query.all()
     result = [
         {
@@ -64,6 +64,39 @@ def get_brands():
         } for b in brands
     ]
     return jsonify(result)
+
+
+@main.route("/brands", methods=["GET"])
+def get_brands():
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 10))
+    search = request.args.get("search", "")
+    brand_id = request.args.get("brand_id", None)
+
+    query = Brand.query
+
+    # Tìm kiếm theo tên
+    if search:
+        query = query.filter(Brand.name.ilike(f"%{search}%"))
+
+    # Lọc theo brand_id
+    if brand_id:
+        query = query.filter(Brand.id == brand_id)
+
+    # Phân trang
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
+    items = [{"id": b.id, "name": b.name} for b in pagination.items]
+
+    return jsonify({
+        "brands": items,
+        "pagination": {
+            "page": pagination.page,
+            "per_page": pagination.per_page,
+            "total_pages": pagination.pages,
+            "total_items": pagination.total
+        }
+    })
 
 
 @main.route("/products")
@@ -892,8 +925,19 @@ def upload_product_images(product_id):
 def admin_get_orders():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
+    search = request.args.get("search", "", type=str)
 
-    pagination = Order.query.order_by(Order.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    query = Order.query
+
+    if search:
+        query = query.join(User, isouter=True).options(contains_eager(Order.user)).filter(
+            or_(
+                User.phone.ilike(f"%{search}%"),
+                Order.guest_phone.ilike(f"%{search}%")
+            )
+        )
+
+    pagination = query.order_by(Order.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
     orders = pagination.items
 
     result = []
@@ -1798,12 +1842,22 @@ def save_extra_costs():
 @main.route('/admin/comments', methods=['GET'])
 @staff_required
 def admin_get_comments():
-    comments = Comment.query.order_by(Comment.created_at.desc()).all()
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    search = request.args.get('search', '', type=str)
+
+    query = Comment.query.join(Product, isouter=True).order_by(Comment.created_at.desc())
+
+    if search:
+        query = query.filter(Product.name.ilike(f"%{search}%"))
+
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    comments = pagination.items
 
     result = []
     for c in comments:
         first_image = None
-        if c.product and c.product.images:  # lấy ảnh đầu tiên của product
+        if c.product and c.product.images:
             first_image = c.product.images[0].url
 
         result.append({
@@ -1820,7 +1874,13 @@ def admin_get_comments():
             "likes": c.likes or 0,
         })
 
-    return jsonify(result)
+    return jsonify({
+        "comments": result,
+        "page": pagination.page,
+        "pages": pagination.pages,
+        "total": pagination.total
+    })
+
 
 @main.route("/admin/comments/<int:comment_id>", methods=["DELETE"])
 @staff_required
