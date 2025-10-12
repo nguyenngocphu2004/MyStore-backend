@@ -277,7 +277,7 @@ def get_product_detail(product_id):
         db.session.query(func.coalesce(func.sum(OrderItem.quantity), 0))
         .join(Order, Order.id == OrderItem.order_id)
         .filter(OrderItem.product_id == product.id)
-        .filter(Order.status == OrderStatus.PAID)  # ✅ dùng enum, không dùng string
+        .filter(Order.status == OrderStatus.PAID)
         .scalar()
     )
 
@@ -710,22 +710,26 @@ def vote_comment(comment_id):
 
     return resp
 
+
 @main.route("/orders", methods=["GET"])
 @jwt_required(optional=True)
 def get_orders():
     user_id = get_jwt_identity()
-    orders = (
-        Order.query
-        .filter(
-            Order.user_id == user_id,
-            Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING,OrderStatus.CANCELED]),
-        )
-        .order_by(Order.created_at.desc())
-        .all()
-    )
+
+    # Lấy page và per_page từ query params, mặc định page=1, per_page=5
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 5))
+
+    orders_query = Order.query.filter(
+        Order.user_id == user_id,
+        Order.status.in_([OrderStatus.PAID, OrderStatus.PENDING, OrderStatus.CANCELED])
+    ).order_by(Order.created_at.desc())
+
+    # Dùng paginate
+    pagination = orders_query.paginate(page=page, per_page=per_page, error_out=False)
 
     result = []
-    for o in orders:
+    for o in pagination.items:
         result.append({
             "id": o.id,
             "total_price": o.total_price,
@@ -740,13 +744,19 @@ def get_orders():
             ],
             "delivery_method": o.delivery_method,
             "address": o.address,
-            "status": o.status.value,  # gợi ý: vẫn trả status để frontend có thông tin
+            "status": o.status.value,
             "delivery_status": o.delivery_status.value,
             "payment_method": o.payment_method,
             "order_code": o.order_code
         })
 
-    return jsonify({"orders": result})
+    return jsonify({
+        "orders": result,
+        "total": pagination.total,
+        "page": pagination.page,
+        "per_page": pagination.per_page,
+        "total_pages": pagination.pages
+    })
 
 
 @main.route("/admin/login", methods=["POST"])
@@ -1657,7 +1667,7 @@ def reset_password():
 @main.route("/google-login", methods=["POST"])
 def google_login():
     data = request.get_json()
-    id_token_received = data.get("id_token")
+    id_token_received = data.get("token")
     if not id_token_received:
         return jsonify({"error": "Thiếu id_token"}), 400
 
@@ -2012,20 +2022,6 @@ def get_productss():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@main.route("/admin/stockin/<int:entry_id>", methods=["DELETE"])
-@staff_required
-def delete_stock_in(entry_id):
-    entry = StockIn.query.get(entry_id)
-    if not entry:
-        return jsonify({"error": "Bản ghi không tồn tại"}), 404
-
-    try:
-        db.session.delete(entry)
-        db.session.commit()
-        return jsonify({"message": "Xóa nhập kho thành công"}), 200
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": "Xóa thất bại"}), 500
 
 @main.route("/admin/stockin/<int:id>", methods=["PUT"])
 @staff_required
