@@ -327,7 +327,7 @@ def update_profile():
     if phone:
         # Kiểm tra email tồn tại chưa
         if User.query.filter(User.phone == phone, User.id != user_id).first():
-            return jsonify({"error": "Số điênj thoại đã được sử dụng"}), 400
+            return jsonify({"error": "Số điện thoại đã được sử dụng"}), 400
         user.phone = phone
     db.session.commit()
     return jsonify({"message": "Cập nhật thành công"}), 200
@@ -349,7 +349,10 @@ def buy_now():
         product = Product.query.get(product_id)
         if not product:
             return jsonify({"error": "Sản phẩm không tồn tại"}), 404
-
+        if quantity > product.stock:
+            return jsonify({
+                "error": f"Số lượng đặt vượt quá tồn kho. Hiện có {int(product.stock)} sản phẩm."
+            }), 400
         user_id = get_jwt_identity()
 
         if not user_id and (not guest_name or not guest_phone):

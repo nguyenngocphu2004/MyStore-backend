@@ -106,9 +106,12 @@ Chúng tôi rất vui vì bạn đã nhận được hàng. Cảm ơn bạn đã
 
 
 def generate_order_code():
-    letters = ''.join(random.choices(string.ascii_uppercase, k=3))  # 3 ký tự chữ in hoa
-    numbers = ''.join(random.choices(string.digits, k=7))            # 7 chữ số
-    return letters + numbers
+    # Lấy ngày hiện tại theo format YYYYMMDD
+    today = datetime.now().strftime("%Y%m%d")
+    # Sinh 6 chữ số ngẫu nhiên
+    random_numbers = ''.join(random.choices(string.digits, k=6))
+    # Ghép thành mã đơn
+    return f"PS{today}{random_numbers}"
 
 def generate_unique_order_code():
     while True:
