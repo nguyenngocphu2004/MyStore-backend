@@ -224,7 +224,14 @@ class ExtraCost(BaseModel):
     rent = db.Column(db.Float, default=0)
     living = db.Column(db.Float, default=0)
     other = db.Column(db.Float, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+class SearchHistory(BaseModel):
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    keyword = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+    user = db.relationship("User", backref="searches")
 
 def seed_data(db):
     if not Category.query.first():

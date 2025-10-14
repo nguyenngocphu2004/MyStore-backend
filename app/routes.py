@@ -1,11 +1,11 @@
 from flask import Blueprint, jsonify,make_response,request
 from .models import (Category, Product, User, UserRole, Order, OrderItem, CartItem, Comment, CommentVote,
-                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn,StockInLog)
+                    ProductImage,OrderStatus,Brand,OTP,DeliveryStatus,ExtraCost,StockIn,StockInLog,SearchHistory)
 from . import db,mail
 from sqlalchemy.orm import contains_eager
 from sqlalchemy import case,func,or_
 from flask_jwt_extended import jwt_required, get_jwt_identity,create_access_token
-import os, requests, random,cloudinary,cloudinary.uploader,hashlib,hmac,uuid
+import os, requests, random,cloudinary,cloudinary.uploader,hashlib,hmac,uuid,re
 from google.auth.transport import requests as google_requests
 from .utils import time_ago,send_order_success_email,generate_unique_order_code,staff_required,admin_required,send_order_delivered_email
 from datetime import datetime,timedelta
@@ -1523,40 +1523,73 @@ def create_order_from_cart():
     db.session.commit()
     return jsonify({"order_id": order.id, "total_price": total_price}), 201
 
+
 @main.route("/chatbot", methods=["POST"])
 def chatbot():
     data = request.get_json()
-    message = data.get("message", "")
+    message = data.get("message", "").strip()
 
     if not message:
         return jsonify({"error": "Message is required"}), 400
 
-    headers = {
-        "Content-Type": "application/json"
-    }
-
-    body = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": message
-                    }
-                ]
-            }
-        ]
-    }
-
     try:
-        response = requests.post(ENDPOINT, headers=headers, json=body)
+        # ===== 1️⃣ NẠP NGỮ CẢNH TỪ DATABASE =====
+        products = Product.query.join(Brand).join(Category).all()
+        product_context = "\n".join([
+            f"- {p.name} ({p.category.name if p.category else 'Không rõ'} - {p.brand.name if p.brand else 'Không rõ'}): "
+            f"Giá {p.price:,.0f}₫, RAM {p.ram}, CPU {p.cpu}, bộ nhớ {p.storage}, "
+            f"màn hình {p.screen}, pin {p.battery}, màu {p.color}."
+            for p in products[:30]
+        ])
+
+        # ===== 2️⃣ THÊM NGỮ CẢNH & HƯỚNG DẪN CHO GEMINI =====
+        context_prompt = f"""
+        Bạn là chatbot tư vấn bán hàng của Cửa hàng điện tử PhuStore.
+        - Địa chỉ: 35c đường 109, Phước Long B, Quận 9, TP.HCM.
+        - Bảo hành sản phẩm: 12 tháng tiêu chuẩn, đổi mới 7 ngày nếu lỗi nhà sản xuất.
+        - Sản phẩm gồm: điện thoại, laptop và phụ kiện công nghệ.
+        - Khi được hỏi về giá, sản phẩm, thương hiệu → hãy trả lời dựa trên dữ liệu có sẵn bên dưới.
+        - Nếu người dùng hỏi các câu xã giao (như “khỏe không”, “hôm nay ngày mấy”, “bạn là ai”) → hãy trả lời thân thiện, ngắn gọn.
+        - Nếu câu hỏi không liên quan đến sản phẩm → vẫn cố gắng trả lời một cách tự nhiên.
+
+        Dưới đây là dữ liệu sản phẩm trong cửa hàng:
+        {product_context}
+
+        Câu hỏi của khách hàng: {message}
+        """
+
+        headers = {"Content-Type": "application/json"}
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": context_prompt}
+                    ]
+                }
+            ]
+        }
+
+        # ===== 3️⃣ GỌI GEMINI API =====
+        response = requests.post(ENDPOINT, headers=headers, json=body, timeout=25)
         response.raise_for_status()
 
         data = response.json()
-        reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        reply = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+
+        if not reply:
+            reply = "Xin lỗi, tôi chưa hiểu câu hỏi của bạn. Bạn có thể nói rõ hơn không ạ?"
+
         return jsonify({"response": reply})
+
     except Exception as e:
-        print("Error calling Gemini:", e)
-        return jsonify({"error": "Lỗi server hoặc API key không đúng"}), 500
+        print("Lỗi chatbot:", e)
+        return jsonify({"response": "Có lỗi xảy ra, vui lòng thử lại sau."}), 500
+
 
 def mask_email(email):
     parts = email.split("@")
@@ -1993,6 +2026,7 @@ def stock_in_history():
             "product_name": e.product.name if e.product else "N/A",
             "quantity": e.quantity,
             "price": e.price,
+            "total": e.quantity * e.price,
             "date": e.date.strftime("%Y-%m-%d"),
             "imported_by": e.user.username if e.user else "Unknown"
         })
@@ -2084,3 +2118,30 @@ def get_stockin_logs(id):
         }
         for log in logs
     ])
+
+@main.route("/save_search", methods=["POST"])
+@jwt_required()
+def save_search():
+    current_user = get_jwt_identity()
+    keyword = request.json.get("keyword", "").strip()
+
+    if not keyword:
+        return jsonify({"message": "Thiếu từ khóa"}), 400
+
+    new_search = SearchHistory(user_id=current_user, keyword=keyword)
+    db.session.add(new_search)
+    db.session.commit()
+
+    return jsonify({"message": "Đã lưu vào database"})
+
+@main.route("/get_searches", methods=["GET"])
+@jwt_required()
+def get_searches():
+    current_user = get_jwt_identity()
+    searches = (
+        SearchHistory.query.filter_by(user_id=current_user)
+        .order_by(SearchHistory.id.desc())
+        .limit(10)
+        .all()
+    )
+    return jsonify([s.keyword for s in searches])
