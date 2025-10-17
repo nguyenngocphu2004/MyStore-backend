@@ -3,7 +3,7 @@ from flask_socketio import join_room, leave_room, emit
 from . import socketio
 
 clients_rooms = {}  # lưu mapping client_sid -> room_id
-
+chat_history = {}
 @socketio.on('connect')
 def handle_connect():
     print(f"Client connected: {request.sid}")
@@ -25,11 +25,15 @@ def handle_client_join():
     print(f"Client {request.sid} joined room {room}")
     emit('admin-notify', {'roomId': room, 'msg': f"Khách hàng {room} đã kết nối"}, broadcast=True)
 
+    if room not in chat_history:
+        chat_history[room] = []
+
 @socketio.on('client-message')
 def handle_client_message(msg):
     room = clients_rooms.get(request.sid)
     if room:
         print(f"Message from client {request.sid} in room {room}: {msg}")
+        chat_history.setdefault(room, []).append({'sender': 'client', 'text': msg})
         emit('admin-message', {'room': room, 'text': f"{msg}"}, room=room)
     else:
         print("Client chưa join room admin chat")
@@ -40,6 +44,10 @@ def handle_admin_join(data):
     if room:
         join_room(room)
         print(f"Admin joined room {room}")
+        history = chat_history.get(room, [])
+        for msg in history:
+            # Gửi từng message
+            emit('admin-message', {'room': room, 'text': msg['text'], 'sender': msg['sender']})
 
 @socketio.on('admin-message')
 def handle_admin_message(data):
@@ -47,4 +55,6 @@ def handle_admin_message(data):
     msg = data.get('msg')
     if room and msg:
         print(f"Admin gửi tin nhắn trong room {room}: {msg}")
+        chat_history.setdefault(room, []).append({'sender': 'admin', 'text': msg})
         emit('client-message', {'room': room, 'text': f"{msg}"}, room=room)
+

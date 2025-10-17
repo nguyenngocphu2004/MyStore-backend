@@ -41,6 +41,40 @@ ZALO_CREATE_ORDER_URL = os.getenv("ZALO_CREATE_ORDER_URL")
 ZALO_NOTIFY_URL = os.getenv("ZALO_NOTIFY_URL")
 
 
+def is_comment_clean(content):
+    prompt = f"""
+    Hãy kiểm tra nội dung sau đây có chứa từ ngữ tục tĩu, lăng mạ, xúc phạm, quấy rối, phân biệt đối xử hoặc ngôn ngữ không phù hợp không.
+
+    Trả lời chỉ bằng "YES" nếu nội dung phù hợp, "NO" nếu không phù hợp.
+
+    Nội dung: "{content}"
+    """
+
+    try:
+        headers = {"Content-Type": "application/json"}
+        body = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}]
+                }
+            ]
+        }
+
+        res = requests.post(ENDPOINT, headers=headers, json=body, timeout=20)
+        res.raise_for_status()
+        data = res.json()
+        text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        ).strip().upper()
+
+        return text == "YES"
+    except Exception as e:
+        print("Gemini moderation error:", e)
+        # Nếu không chắc chắn thì chặn để an toàn
+        return False
 
 
 @main.route("/categories", methods=["GET"])
@@ -588,6 +622,8 @@ def add_comment(product_id):
     try:
         data = request.get_json()
         content = data.get("content")
+        if not is_comment_clean(content):
+            return jsonify({"error": "Nội dung bình luận không phù hợp. Vui lòng điều chỉnh lại."}), 400
         rating = data.get("rating")
         if not content:
             return jsonify({"error": "Nội dung không được để trống"}), 400
@@ -1545,7 +1581,6 @@ def chatbot():
             for p in products[:30]
         ])
 
-        # ===== 2️⃣ THÊM NGỮ CẢNH & HƯỚNG DẪN CHO GEMINI =====
         context_prompt = f"""
         Bạn là chatbot tư vấn bán hàng của Cửa hàng điện tử PhuStore.
         - Địa chỉ: 35c đường 109, Phước Long B, Quận 9, TP.HCM.
@@ -1554,6 +1589,7 @@ def chatbot():
         - Khi được hỏi về giá, sản phẩm, thương hiệu → hãy trả lời dựa trên dữ liệu có sẵn bên dưới.
         - Nếu người dùng hỏi các câu xã giao (như “khỏe không”, “hôm nay ngày mấy”, “bạn là ai”) → hãy trả lời thân thiện, ngắn gọn.
         - Nếu câu hỏi không liên quan đến sản phẩm → vẫn cố gắng trả lời một cách tự nhiên.
+        - Hotline: 0123456789
 
         Dưới đây là dữ liệu sản phẩm trong cửa hàng:
         {product_context}
